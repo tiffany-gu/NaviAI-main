@@ -4,12 +4,16 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import JourneyAssistant from "@/pages/JourneyAssistant";
+import MapTest from "@/pages/MapTest";
+import NavigationTest from "@/pages/NavigationTest";
 import NotFound from "@/pages/not-found";
 
 function Router() {
   return (
     <Switch>
       <Route path="/" component={JourneyAssistant} />
+      <Route path="/test" component={MapTest} />
+      <Route path="/nav-test" component={NavigationTest} />
       <Route component={NotFound} />
     </Switch>
   );

@@ -1,3 +1,19 @@
+// Load environment variables FIRST, before any other imports
+import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
+import path from 'path';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const result = dotenv.config({ path: path.resolve(__dirname, '../.env.local') });
+
+if (result.error) {
+  console.error('Error loading .env.local:', result.error);
+} else {
+  console.log('Loaded .env.local with keys:', Object.keys(result.parsed || {}));
+}
+
+// Now import other modules
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
@@ -67,10 +83,9 @@ app.use((req, res, next) => {
   }
 
   // ALWAYS serve the app on the port specified in the environment variable PORT
-  // Other ports are firewalled. Default to 5000 if not specified.
+  // Default to 3000 (port 5000 is often used by macOS AirPlay Receiver)
   // this serves both the API and the client.
-  // It is the only port that is not firewalled.
-  const port = parseInt(process.env.PORT || '5000', 10);
+  const port = parseInt(process.env.PORT || '3000', 10);
   server.listen(port, "0.0.0.0", () => {
     log(`serving on port ${port}`);
   });

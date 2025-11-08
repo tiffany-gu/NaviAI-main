@@ -27,10 +27,13 @@ interface Stop {
   distanceOffRoute: string;
   reason: string;
   location?: any;
+  verifiedAttributes?: string[]; // Grounded attributes verified from Google Maps
 }
 
 export default function JourneyAssistant() {
   const [isRecording, setIsRecording] = useState(false);
+  const [isNavigating, setIsNavigating] = useState(false);
+  const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "1",
@@ -42,8 +45,37 @@ export default function JourneyAssistant() {
   const [tripRequestId, setTripRequestId] = useState<string | null>(null);
   const [routeData, setRouteData] = useState<any>(null);
   const [stops, setStops] = useState<Stop[]>([]);
+  const [addedStops, setAddedStops] = useState<Array<{ type: string; name: string; location: { lat: number; lng: number }; category?: string }>>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
+
+  // Get user location on app load
+  useEffect(() => {
+    if ('geolocation' in navigator) {
+      console.log('[JourneyAssistant] Requesting user location on app load');
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          const location = {
+            lat: position.coords.latitude,
+            lng: position.coords.longitude
+          };
+          setUserLocation(location);
+          console.log('[JourneyAssistant] User location detected:', location);
+        },
+        (error) => {
+          console.error('[JourneyAssistant] Error getting user location:', error);
+          // Don't show toast on initial load to avoid annoying users
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 10000,
+          maximumAge: 300000 // Cache for 5 minutes
+        }
+      );
+    } else {
+      console.warn('[JourneyAssistant] Geolocation not supported in this browser');
+    }
+  }, []);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -53,7 +85,39 @@ export default function JourneyAssistant() {
 
   const chatMutation = useMutation({
     mutationFn: async (message: string) => {
-      const res = await apiRequest('POST', '/api/chat', { message, tripRequestId });
+      // Check if message is asking for route to a destination (uses current location)
+      const toPattern = /(?:plan\s+(?:a\s+)?(?:trip|route)\s+)?to\s+[a-zA-Z\s,]+/i;
+      const fromPattern = /from\s+[a-zA-Z\s,]+\s+to\s+[a-zA-Z\s,]+/i;
+
+      // Use stored userLocation if available and user is asking for "to X" without "from"
+      let locationToSend = null;
+      if (toPattern.test(message) && !fromPattern.test(message)) {
+        if (userLocation) {
+          locationToSend = userLocation;
+          console.log('[chatMutation] Using stored user location:', locationToSend);
+        } else if ('geolocation' in navigator) {
+          // Fallback: try to get location if not already stored
+          try {
+            const position = await new Promise<GeolocationPosition>((resolve, reject) => {
+              navigator.geolocation.getCurrentPosition(resolve, reject, {
+                enableHighAccuracy: true,
+                timeout: 5000,
+                maximumAge: 0
+              });
+            });
+            locationToSend = {
+              lat: position.coords.latitude,
+              lng: position.coords.longitude
+            };
+            setUserLocation(locationToSend); // Store for future use
+            console.log('[chatMutation] Got fresh user location:', locationToSend);
+          } catch (error) {
+            console.error('[chatMutation] Could not get user location:', error);
+          }
+        }
+      }
+
+      const res = await apiRequest('POST', '/api/chat', { message, tripRequestId, userLocation: locationToSend });
       return await res.json();
     },
     onSuccess: (data: any) => {
@@ -115,16 +179,45 @@ export default function JourneyAssistant() {
       return await res.json();
     },
     onSuccess: (data: any) => {
-      setStops(data.stops);
+      setStops(data.stops || []);
       
-      if (data.stops.length > 0) {
+      // Update route if a new route with waypoints was returned
+      // When stops are found, they're automatically added to the route by the backend
+      // So we should track which stops were automatically added
+      if (data.route) {
+        console.log('[JourneyAssistant] Updating route with waypoints from find-stops:', data.route);
+        setRouteData(data.route);
+        
+        // If the backend automatically recalculated the route with stops,
+        // we should mark those stops as "added" so they show as waypoints
+        // However, for now, we'll let users manually add stops via the UI
+        // The route already includes them as waypoints in the backend response
+        
+        const routeMessage: Message = {
+          id: Date.now().toString(),
+          text: `Route recalculated to include ${data.stops?.length || 0} stop${data.stops?.length !== 1 ? 's' : ''}. The directions now go through each stop in order.`,
+          isUser: false,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        };
+        setMessages((prev) => [...prev, routeMessage]);
+      }
+      
+      if (data.stops && data.stops.length > 0) {
         const stopsMessage: Message = {
           id: Date.now().toString(),
-          text: "Here are some recommended stops along your route:",
+          text: `Found ${data.stops.length} recommended stop${data.stops.length > 1 ? 's' : ''} along your route! Click "Add to Route" to include them in your directions.`,
           isUser: false,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
         setMessages((prev) => [...prev, stopsMessage]);
+      } else {
+        const noStopsMessage: Message = {
+          id: Date.now().toString(),
+          text: "I couldn't find any stops along this route. Try adding preferences like restaurant types or scenic views to get better recommendations.",
+          isUser: false,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        };
+        setMessages((prev) => [...prev, noStopsMessage]);
       }
     },
     onError: (error: Error) => {
@@ -194,35 +287,161 @@ export default function JourneyAssistant() {
   const calculateRouteComparison = () => {
     if (!routeData || !routeData.legs) return null;
 
+    // Calculate total duration from all legs (route already includes waypoints)
     const totalDuration = routeData.legs.reduce(
       (sum: number, leg: any) => sum + (leg.duration?.value || 0),
       0
     );
-    const hours = Math.floor(totalDuration / 3600);
-    const minutes = Math.floor((totalDuration % 3600) / 60);
 
-    const googleFastest = `${hours}h ${minutes}m`;
-    const addedMinutes = stops.length * 10;
-    const yourRouteMinutes = minutes + addedMinutes;
-    const yourRouteHours = hours + Math.floor(yourRouteMinutes / 60);
-    const yourRouteRemainingMinutes = yourRouteMinutes % 60;
-    const yourRoute = `${yourRouteHours}h ${yourRouteRemainingMinutes}m`;
+    // Add estimated time for stops (10 minutes per added stop for actual stops)
+    const totalWithStops = totalDuration + (addedStops.length * 600); // 600 seconds = 10 minutes per stop
+
+    const hours = Math.floor(totalWithStops / 3600);
+    const minutes = Math.floor((totalWithStops % 3600) / 60);
+
+    let eta = '';
+    if (hours > 0) {
+      eta = `${hours}h ${minutes}m`;
+    } else {
+      eta = `${minutes}m`;
+    }
+
+    // Calculate total distance
+    const totalDistance = routeData.legs.reduce(
+      (sum: number, leg: any) => sum + (leg.distance?.value || 0),
+      0
+    );
+    const distanceMiles = (totalDistance / 1609.34).toFixed(1);
 
     return {
-      googleFastest,
-      yourRoute,
-      timeDifference: `${addedMinutes}m`,
-      stops: stops.length,
-      estimatedCost: "$23 gas",
+      eta,
+      stops: addedStops.length,
+      distance: distanceMiles,
+      totalDuration: totalWithStops,
     };
   };
+
+  const handleStartNavigation = () => {
+    setIsNavigating(true);
+    toast({
+      title: "Navigation Started",
+      description: "Follow the route on the map. Drive safely!",
+    });
+  };
+
+  const handleAddStopToRoute = (stop: { type: string; name: string; location: { lat: number; lng: number } }) => {
+    console.log('[handleAddStopToRoute] Adding stop to route:', stop);
+
+    // Find the full stop details to preserve type and category
+    const fullStop = stops.find(s => s.name === stop.name);
+    const stopToAdd = {
+      type: stop.type,
+      name: stop.name,
+      location: stop.location,
+      category: fullStop?.category || stop.type,
+    };
+
+    // Add the stop to addedStops (this will be used to show waypoint markers)
+    const updatedAddedStops = [...addedStops, stopToAdd];
+    setAddedStops(updatedAddedStops);
+
+    // Remove the stop from the available stops list
+    setStops(prev => prev.filter(s => s.name !== stop.name));
+
+    // Show toast
+    toast({
+      title: "Stop Added",
+      description: `${stop.name} has been added to your route. Recalculating directions...`,
+    });
+
+    // Trigger route recalculation with waypoints (include all previously added stops + new one)
+    if (tripRequestId) {
+      recalculateRouteMutation.mutate({
+        tripRequestId,
+        waypoints: updatedAddedStops.map(s => ({
+          name: s.name,
+          location: s.location,
+        })),
+      });
+    }
+  };
+
+  const recalculateRouteMutation = useMutation({
+    mutationFn: async ({ tripRequestId, waypoints }: { tripRequestId: string; waypoints: Array<{ name: string; location: { lat: number; lng: number } }> }) => {
+      console.log('[recalculateRoute] Making request with:', { tripRequestId, waypoints });
+
+      try {
+        const res = await apiRequest('POST', '/api/recalculate-route', { tripRequestId, waypoints });
+
+        console.log('[recalculateRoute] Response status:', res.status);
+        console.log('[recalculateRoute] Response headers:', res.headers);
+
+        if (!res.ok) {
+          const errorText = await res.text();
+          console.error('[recalculateRoute] Error response:', errorText);
+          throw new Error(`Server returned ${res.status}: ${errorText}`);
+        }
+
+        const data = await res.json();
+        console.log('[recalculateRoute] Success response:', data);
+        return data;
+      } catch (error) {
+        console.error('[recalculateRoute] Request failed:', error);
+        throw error;
+      }
+    },
+    onSuccess: (data: any, variables: { tripRequestId: string; waypoints: Array<{ name: string; location: { lat: number; lng: number } }> }) => {
+      console.log('[recalculateRoute] Route updated with waypoints:', data.route);
+      setRouteData(data.route);
+      
+      // Use the waypoints from the mutation variables to get accurate count
+      const stopCount = variables.waypoints.length;
+      
+      // Calculate updated travel time
+      const totalDuration = data.route?.legs?.reduce((sum: number, leg: any) => sum + (leg.duration?.value || 0), 0) || 0;
+      const hours = Math.floor(totalDuration / 3600);
+      const minutes = Math.floor((totalDuration % 3600) / 60);
+      const durationText = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+      
+      const totalDistance = data.route?.legs?.reduce((sum: number, leg: any) => sum + (leg.distance?.value || 0), 0) || 0;
+      const distanceMiles = (totalDistance / 1609.34).toFixed(1);
+      
+      // Add 10 minutes per stop for stop time
+      const totalTimeWithStops = totalDuration + (stopCount * 600);
+      const hoursWithStops = Math.floor(totalTimeWithStops / 3600);
+      const minutesWithStops = Math.floor((totalTimeWithStops % 3600) / 60);
+      const durationWithStopsText = hoursWithStops > 0 ? `${hoursWithStops}h ${minutesWithStops}m` : `${minutesWithStops}m`;
+      
+      toast({
+        title: "Route Updated",
+        description: `Route recalculated! ${distanceMiles} miles, ${durationWithStopsText} total (${stopCount} stop${stopCount !== 1 ? 's' : ''})`,
+      });
+      
+      // Add message to chat about the route update
+      const routeUpdateMessage: Message = {
+        id: Date.now().toString(),
+        text: `Route updated! Your journey now includes ${stopCount} stop${stopCount !== 1 ? 's' : ''}. Estimated travel time: ${durationWithStopsText} (including ${stopCount * 10} minutes for stops), Total distance: ${distanceMiles} miles.`,
+        isUser: false,
+        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      };
+      setMessages((prev) => [...prev, routeUpdateMessage]);
+    },
+    onError: (error: Error) => {
+      console.error('[recalculateRoute] Mutation error:', error);
+      toast({
+        title: "Route Recalculation Error",
+        description: error.message,
+        variant: "destructive",
+      });
+    },
+  });
 
   const comparison = calculateRouteComparison();
 
   return (
     <div className="flex flex-col h-screen bg-background">
       <AppHeader isRecording={isRecording} />
-      
+
       <div className="flex-1 flex overflow-hidden">
         <div className="w-[40%] border-r border-border flex flex-col">
           <ScrollArea className="flex-1 p-6">
@@ -235,17 +454,28 @@ export default function JourneyAssistant() {
                   timestamp={message.timestamp}
                 />
               ))}
-              
+
               {comparison && (
                 <div className="py-2" data-testid="container-route-comparison">
-                  <RouteComparisonCard {...comparison} />
+                  <RouteComparisonCard
+                    eta={comparison.eta}
+                    stops={comparison.stops}
+                    distance={comparison.distance}
+                    addedStops={addedStops}
+                    onStartNavigation={handleStartNavigation}
+                  />
                 </div>
               )}
               
               {stops.length > 0 && (
                 <div className="space-y-3" data-testid="container-stops">
                   {stops.map((stop, index) => (
-                    <StopCard key={index} {...stop} />
+                    <StopCard
+                      key={index}
+                      {...stop}
+                      onAddToRoute={handleAddStopToRoute}
+                      onSkip={() => setStops(prev => prev.filter((_, i) => i !== index))}
+                    />
                   ))}
                 </div>
               )}
@@ -273,7 +503,13 @@ export default function JourneyAssistant() {
         </div>
         
         <div className="flex-1 p-6 flex flex-col">
-          <MapView route={routeData} stops={stops} />
+              <MapView
+                route={routeData}
+                stops={stops}
+                addedStops={addedStops}
+                isNavigating={isNavigating}
+                userLocation={userLocation}
+              />
         </div>
       </div>
     </div>

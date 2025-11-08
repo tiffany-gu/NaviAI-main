@@ -1,7 +1,5 @@
-import { MapPin, Navigation, Eye, Map as MapIcon } from "lucide-react";
+import { MapPin, Navigation, Map as MapIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-import mapboxgl from 'mapbox-gl';
-import 'mapbox-gl/dist/mapbox-gl.css';
 import { Button } from "@/components/ui/button";
 
 interface MapViewProps {
@@ -11,246 +9,338 @@ interface MapViewProps {
     name: string;
     location?: any;
   }>;
+  addedStops?: Array<{
+    type: string;
+    name: string;
+    location: { lat: number; lng: number };
+    category?: string;
+  }>;
+  isNavigating?: boolean;
+  userLocation?: { lat: number; lng: number } | null;
 }
 
-export default function MapView({ route, stops = [] }: MapViewProps) {
+export default function MapView({ route, stops = [], addedStops = [], isNavigating = false, userLocation: initialUserLocation }: MapViewProps) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
-  const mapRef = useRef<mapboxgl.Map | null>(null);
-  const markersRef = useRef<mapboxgl.Marker[]>([]);
+  const mapRef = useRef<google.maps.Map | null>(null);
+  const markersRef = useRef<google.maps.Marker[]>([]);
+  const waypointMarkersRef = useRef<google.maps.Marker[]>([]);
+  const userLocationMarkerRef = useRef<google.maps.Marker | null>(null);
+  const routePolylineRef = useRef<google.maps.Polyline | null>(null);
   const [isNavigationView, setIsNavigationView] = useState(false);
+  const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(initialUserLocation || null);
+  const [currentStep, setCurrentStep] = useState<number>(0);
+  const [nextInstruction, setNextInstruction] = useState<string>("");
+  const watchIdRef = useRef<number | null>(null);
+  const [mapLoaded, setMapLoaded] = useState(false);
 
-  // Initialize Mapbox
+  // Update userLocation when prop changes
   useEffect(() => {
-    const accessToken = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN;
+    if (initialUserLocation && !isNavigating) {
+      setUserLocation(initialUserLocation);
+    }
+  }, [initialUserLocation, isNavigating]);
 
-    if (!accessToken) {
-      console.error('[MapView] Mapbox access token is missing');
+  // Initialize Google Maps
+  useEffect(() => {
+    const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+
+    if (!apiKey) {
+      console.error('[MapView] Google Maps API key is missing');
       return;
     }
 
     if (mapRef.current || !mapContainerRef.current) return;
 
-    console.log('[MapView] Initializing Mapbox');
-    mapboxgl.accessToken = accessToken;
+    console.log('[MapView] Initializing Google Maps');
 
-    const map = new mapboxgl.Map({
-      container: mapContainerRef.current,
-      style: 'mapbox://styles/mapbox/streets-v12', // Modern street map style
-      center: [-122.4194, 37.7749], // San Francisco
-      zoom: 15,
-      pitch: 45, // Tilt map for 3D view
-      bearing: -17.6, // Rotate map slightly
-      attributionControl: true,
-      antialias: true, // Smooth 3D rendering
-    });
+    // Load Google Maps script dynamically
+    const loadGoogleMaps = async () => {
+      // Check if Google Maps is already loaded
+      if (window.google?.maps) {
+        initializeMap();
+        return;
+      }
 
-    // Add navigation controls (zoom, rotate, pitch)
-    map.addControl(new mapboxgl.NavigationControl(), 'top-right');
+      // Check if script is already loading
+      const existingScript = document.querySelector(`script[src*="maps.googleapis.com"]`);
+      if (existingScript) {
+        existingScript.addEventListener('load', initializeMap);
+        return;
+      }
 
-    // Add fullscreen control
-    map.addControl(new mapboxgl.FullscreenControl(), 'top-right');
+      // Create and load the script
+      const script = document.createElement('script');
+      script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}&libraries=places,geometry&v=weekly`;
+      script.async = true;
+      script.defer = true;
 
-    mapRef.current = map;
-    console.log('[MapView] Mapbox initialized successfully');
+      script.onload = () => {
+        console.log('[MapView] Google Maps script loaded');
+        initializeMap();
+      };
 
-    // Add 3D terrain, buildings, and sky when map loads
-    map.on('load', () => {
-      console.log('[MapView] Adding 3D terrain and buildings');
+      script.onerror = (error) => {
+        console.error('[MapView] Error loading Google Maps script:', error);
+      };
 
-      // Add 3D terrain source
-      map.addSource('mapbox-dem', {
-        type: 'raster-dem',
-        url: 'mapbox://mapbox.mapbox-terrain-dem-v1',
-        tileSize: 512,
-        maxzoom: 14,
-      });
+      document.head.appendChild(script);
+    };
 
-      // Set 3D terrain with exaggeration
-      map.setTerrain({
-        source: 'mapbox-dem',
-        exaggeration: 1.5, // Makes terrain more dramatic
-      });
+    const initializeMap = () => {
+      if (!mapContainerRef.current || !window.google?.maps) return;
 
-      // Add sky layer for atmosphere
-      map.addLayer({
-        id: 'sky',
-        type: 'sky',
-        paint: {
-          'sky-type': 'atmosphere',
-          'sky-atmosphere-sun': [0.0, 0.0],
-          'sky-atmosphere-sun-intensity': 15,
-        },
-      });
+      try {
+        // Center on user location if available, otherwise default to San Francisco
+        const initialCenter = initialUserLocation
+          ? { lat: initialUserLocation.lat, lng: initialUserLocation.lng }
+          : { lat: 37.7749, lng: -122.4194 };
 
-      // Add 3D buildings layer
-      const layers = map.getStyle().layers;
-      const labelLayerId = layers.find(
-        (layer) => layer.type === 'symbol' && layer.layout?.['text-field']
-      )?.id;
+        const map = new google.maps.Map(mapContainerRef.current, {
+          center: initialCenter,
+          zoom: 15,
+          mapTypeControl: true,
+          fullscreenControl: true,
+          streetViewControl: true,
+          zoomControl: true,
+          mapTypeId: google.maps.MapTypeId.ROADMAP,
+        });
 
-      map.addLayer(
-        {
-          id: '3d-buildings',
-          source: 'composite',
-          'source-layer': 'building',
-          filter: ['==', 'extrude', 'true'],
-          type: 'fill-extrusion',
-          minzoom: 15,
-          paint: {
-            'fill-extrusion-color': '#aaa',
-            'fill-extrusion-height': [
-              'interpolate',
-              ['linear'],
-              ['zoom'],
-              15,
-              0,
-              15.05,
-              ['get', 'height'],
-            ],
-            'fill-extrusion-base': [
-              'interpolate',
-              ['linear'],
-              ['zoom'],
-              15,
-              0,
-              15.05,
-              ['get', 'min_height'],
-            ],
-            'fill-extrusion-opacity': 0.6,
-          },
-        },
-        labelLayerId
-      );
+        mapRef.current = map;
+        setMapLoaded(true);
+        console.log('[MapView] Google Maps initialized successfully');
+      } catch (error) {
+        console.error('[MapView] Error initializing map:', error);
+      }
+    };
 
-      console.log('[MapView] 3D terrain and buildings added successfully');
-    });
+    loadGoogleMaps();
 
     return () => {
-      map.remove();
-      mapRef.current = null;
+      // Cleanup
+      if (mapRef.current) {
+        mapRef.current = null;
+      }
     };
-  }, []);
+  }, [initialUserLocation]);
 
   // Handle route rendering
   useEffect(() => {
-    if (!mapRef.current || !route) return;
+    if (!mapRef.current || !route || !mapLoaded) return;
 
     const map = mapRef.current;
-    console.log('[MapView] Rendering route on Mapbox');
+    console.log('[MapView] Rendering route on Google Maps');
 
-    // Clear existing markers
-    markersRef.current.forEach(marker => marker.remove());
-    markersRef.current = [];
+    // Clear existing route markers (start/end) but preserve waypoint markers and user location
+    const routeMarkers = markersRef.current.filter(marker => 
+      marker !== userLocationMarkerRef.current &&
+      !waypointMarkersRef.current.includes(marker)
+    );
+    routeMarkers.forEach(marker => marker.setMap(null));
+    markersRef.current = markersRef.current.filter(marker => 
+      marker === userLocationMarkerRef.current || waypointMarkersRef.current.includes(marker)
+    );
 
-    // Remove existing route layer if it exists
-    if (map.getLayer('route')) {
-      map.removeLayer('route');
-    }
-    if (map.getSource('route')) {
-      map.removeSource('route');
+    // Remove existing route polyline if it exists
+    if (routePolylineRef.current) {
+      routePolylineRef.current.setMap(null);
     }
 
     // Decode and render polyline
     if (route.overview_polyline?.points) {
-      const decodedPath = decodePolyline(route.overview_polyline.points);
+      const decodedPath = google.maps.geometry.encoding.decodePath(route.overview_polyline.points);
 
-      // Convert to GeoJSON format for Mapbox
-      const geojson = {
-        type: 'Feature' as const,
-        properties: {},
-        geometry: {
-          type: 'LineString' as const,
-          coordinates: decodedPath.map(([lat, lng]) => [lng, lat]), // Mapbox uses [lng, lat]
-        },
-      };
+      const routePolyline = new google.maps.Polyline({
+        path: decodedPath,
+        strokeColor: '#3B82F6',
+        strokeOpacity: 0.85,
+        strokeWeight: 6,
+        map: map,
+        zIndex: 5, // Lower than waypoint markers
+      });
 
-      // Wait for map to load before adding source/layer
-      const addRoute = () => {
-        if (!map.getSource('route')) {
-          map.addSource('route', {
-            type: 'geojson',
-            data: geojson,
-          });
+      routePolylineRef.current = routePolyline;
 
-          map.addLayer({
-            id: 'route',
-            type: 'line',
-            source: 'route',
-            layout: {
-              'line-join': 'round',
-              'line-cap': 'round',
-            },
-            paint: {
-              'line-color': '#3B82F6',
-              'line-width': 4,
-              'line-opacity': 0.9,
-            },
+      // Fit map to route bounds including waypoints (only when NOT navigating)
+      if (!isNavigating) {
+        const bounds = new google.maps.LatLngBounds();
+        decodedPath.forEach((point) => {
+          bounds.extend(point);
+        });
+        
+        // Also include waypoints in bounds
+        if (addedStops && addedStops.length > 0) {
+          addedStops.forEach(stop => {
+            if (stop.location) {
+              bounds.extend({ lat: stop.location.lat, lng: stop.location.lng });
+            }
           });
         }
-
-        // Fit map to route bounds
-        const bounds = new mapboxgl.LngLatBounds();
-        decodedPath.forEach(([lat, lng]) => {
-          bounds.extend([lng, lat]);
-        });
-        map.fitBounds(bounds, { padding: 50 });
-      };
-
-      if (map.isStyleLoaded()) {
-        addRoute();
-      } else {
-        map.once('load', addRoute);
+        
+        map.fitBounds(bounds, { padding: 80 });
       }
     }
 
-    // Add start and end markers
-    if (route.legs && route.legs[0]) {
+    // Add start and end markers (only when NOT navigating and no waypoints)
+    // When waypoints exist, they serve as the route markers
+    if (route.legs && route.legs[0] && !isNavigating && (!addedStops || addedStops.length === 0)) {
       const startLoc = route.legs[0].start_location;
 
       // Start marker (green)
-      const startEl = document.createElement('div');
-      startEl.className = 'marker';
-      startEl.style.backgroundColor = '#10B981';
-      startEl.style.width = '24px';
-      startEl.style.height = '24px';
-      startEl.style.borderRadius = '50%';
-      startEl.style.border = '3px solid white';
-      startEl.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3)';
-      startEl.style.cursor = 'pointer';
-
-      const startMarker = new mapboxgl.Marker({ element: startEl })
-        .setLngLat([startLoc.lng, startLoc.lat])
-        .setPopup(new mapboxgl.Popup().setText('Start'))
-        .addTo(map);
+      const startMarker = new google.maps.Marker({
+        position: { lat: startLoc.lat, lng: startLoc.lng },
+        map: map,
+        title: 'Start',
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE,
+          scale: 10,
+          fillColor: '#10B981',
+          fillOpacity: 1,
+          strokeColor: 'white',
+          strokeWeight: 3,
+        },
+        zIndex: 5,
+      });
 
       markersRef.current.push(startMarker);
 
       // End marker (red)
       const endLoc = route.legs[route.legs.length - 1].end_location;
-      const endEl = document.createElement('div');
-      endEl.className = 'marker';
-      endEl.style.backgroundColor = '#EF4444';
-      endEl.style.width = '24px';
-      endEl.style.height = '24px';
-      endEl.style.borderRadius = '50%';
-      endEl.style.border = '3px solid white';
-      endEl.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3)';
-      endEl.style.cursor = 'pointer';
+      const endMarker = new google.maps.Marker({
+        position: { lat: endLoc.lat, lng: endLoc.lng },
+        map: map,
+        title: 'Destination',
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE,
+          scale: 10,
+          fillColor: '#EF4444',
+          fillOpacity: 1,
+          strokeColor: 'white',
+          strokeWeight: 3,
+        },
+        zIndex: 5,
+      });
 
-      const endMarker = new mapboxgl.Marker({ element: endEl })
-        .setLngLat([endLoc.lng, endLoc.lat])
-        .setPopup(new mapboxgl.Popup().setText('Destination'))
-        .addTo(map);
+      markersRef.current.push(endMarker);
+    } else if (route.legs && route.legs[0] && !isNavigating && addedStops && addedStops.length > 0) {
+      // When waypoints exist, still show start and destination markers
+      const startLoc = route.legs[0].start_location;
+      const endLoc = route.legs[route.legs.length - 1].end_location;
+
+      // Start marker (green) - smaller since waypoints are more prominent
+      const startMarker = new google.maps.Marker({
+        position: { lat: startLoc.lat, lng: startLoc.lng },
+        map: map,
+        title: 'Start',
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE,
+          scale: 8,
+          fillColor: '#10B981',
+          fillOpacity: 0.9,
+          strokeColor: 'white',
+          strokeWeight: 2,
+        },
+        zIndex: 5,
+      });
+
+      markersRef.current.push(startMarker);
+
+      // End marker (red) - smaller since waypoints are more prominent
+      const endMarker = new google.maps.Marker({
+        position: { lat: endLoc.lat, lng: endLoc.lng },
+        map: map,
+        title: 'Destination',
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE,
+          scale: 8,
+          fillColor: '#EF4444',
+          fillOpacity: 0.9,
+          strokeColor: 'white',
+          strokeWeight: 2,
+        },
+        zIndex: 5,
+      });
 
       markersRef.current.push(endMarker);
     }
-  }, [route]);
+  }, [route, isNavigating, mapLoaded, addedStops]);
 
-  // Handle stops rendering
+  // Handle added stops rendering (waypoints - shown as prominent numbered markers)
   useEffect(() => {
-    if (!mapRef.current || stops.length === 0) return;
+    if (!mapRef.current || !mapLoaded) return;
 
-    console.log('[MapView] Rendering stops:', stops.length);
+    // Clear existing waypoint markers
+    waypointMarkersRef.current.forEach(marker => {
+      marker.setMap(null);
+    });
+    waypointMarkersRef.current = [];
+
+    if (addedStops.length === 0) return;
+
+    console.log('[MapView] Rendering waypoint markers for added stops:', addedStops.length);
+
+    const colorMap: Record<string, string> = {
+      gas: '#2563EB',
+      restaurant: '#EA580C',
+      scenic: '#9333EA',
+    };
+
+    // Render added stops as waypoint markers (larger, more prominent, numbered)
+    addedStops.forEach((stop, index) => {
+      if (!stop.location || !mapRef.current) return;
+
+      const marker = new google.maps.Marker({
+        position: { lat: stop.location.lat, lng: stop.location.lng },
+        map: mapRef.current,
+        title: `Waypoint ${index + 1}: ${stop.name}`,
+        label: {
+          text: `${index + 1}`,
+          fontSize: '12px',
+          fontWeight: 'bold',
+          color: 'white',
+        },
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE,
+          scale: 18,
+          fillColor: colorMap[stop.type] || '#3B82F6',
+          fillOpacity: 1,
+          strokeColor: 'white',
+          strokeWeight: 3,
+        },
+        zIndex: 100, // Highest z-index for waypoint markers
+      });
+
+      const infoWindow = new google.maps.InfoWindow({
+        content: `<div style="padding: 8px;">
+          <strong>Waypoint ${index + 1}: ${stop.name}</strong><br>
+          <span style="text-transform: capitalize; color: ${colorMap[stop.type] || '#3B82F6'};">${stop.category || stop.type}</span><br>
+          <small style="color: #10B981; font-weight: bold;">✓ Added to route</small>
+        </div>`,
+      });
+
+      marker.addListener('click', () => {
+        infoWindow.open(mapRef.current!, marker);
+      });
+
+      waypointMarkersRef.current.push(marker);
+    });
+
+    // Note: Bounds fitting is handled in route rendering effect to include route polyline
+  }, [addedStops, mapLoaded]);
+
+  // Handle stops rendering (available stops - shown as smaller markers)
+  useEffect(() => {
+    if (!mapRef.current || !mapLoaded) return;
+
+    // Clear existing available stop markers (but keep waypoints)
+    // We'll filter out waypoint markers
+    const availableStopMarkers = markersRef.current.filter(marker => 
+      marker !== userLocationMarkerRef.current &&
+      !waypointMarkersRef.current.includes(marker)
+    );
+    availableStopMarkers.forEach(marker => marker.setMap(null));
+    markersRef.current = markersRef.current.filter(marker => 
+      marker === userLocationMarkerRef.current || waypointMarkersRef.current.includes(marker)
+    );
 
     const colorMap = {
       gas: '#3B82F6',
@@ -264,78 +354,233 @@ export default function MapView({ route, stops = [] }: MapViewProps) {
       scenic: '🏞️',
     };
 
-    stops.forEach((stop) => {
+    // Render available stops (smaller, lighter markers)
+    // Skip stops that are already added as waypoints
+    const availableStops = stops.filter(stop => 
+      !addedStops.some(added => added.name === stop.name)
+    );
+
+    availableStops.forEach((stop) => {
       if (!stop.location || !mapRef.current) return;
 
-      // Create custom marker element
-      const el = document.createElement('div');
-      el.className = 'stop-marker';
-      el.style.backgroundColor = colorMap[stop.type];
-      el.style.width = '20px';
-      el.style.height = '20px';
-      el.style.borderRadius = '50%';
-      el.style.border = '2px solid white';
-      el.style.boxShadow = '0 2px 4px rgba(0,0,0,0.3)';
-      el.style.cursor = 'pointer';
-      el.style.display = 'flex';
-      el.style.alignItems = 'center';
-      el.style.justifyContent = 'center';
-      el.style.fontSize = '12px';
-      el.textContent = iconMap[stop.type];
+      const marker = new google.maps.Marker({
+        position: { lat: stop.location.lat, lng: stop.location.lng },
+        map: mapRef.current,
+        title: stop.name,
+        label: {
+          text: iconMap[stop.type],
+          fontSize: '14px',
+        },
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE,
+          scale: 10,
+          fillColor: colorMap[stop.type],
+          fillOpacity: 0.6,
+          strokeColor: 'white',
+          strokeWeight: 2,
+        },
+        zIndex: 1, // Lower z-index for available stops
+      });
 
-      const marker = new mapboxgl.Marker({ element: el })
-        .setLngLat([stop.location.lng, stop.location.lat])
-        .setPopup(
-          new mapboxgl.Popup({ offset: 25 }).setHTML(
-            `<div style="padding: 4px;">
-              <strong>${stop.name}</strong><br>
-              <span style="text-transform: capitalize; color: ${colorMap[stop.type]};">${stop.type}</span>
-            </div>`
-          )
-        )
-        .addTo(mapRef.current);
+      const infoWindow = new google.maps.InfoWindow({
+        content: `<div style="padding: 8px;">
+          <strong>${stop.name}</strong><br>
+          <span style="text-transform: capitalize; color: ${colorMap[stop.type]};">${stop.type}</span><br>
+          <small>Click "Add to Route" to include this stop</small>
+        </div>`,
+      });
+
+      marker.addListener('click', () => {
+        infoWindow.open(mapRef.current!, marker);
+      });
 
       markersRef.current.push(marker);
     });
-  }, [stops]);
+  }, [stops, addedStops, mapLoaded]);
 
-  // Toggle between overview and navigation view
+  // Handle real-time location tracking during navigation
+  useEffect(() => {
+    if (!isNavigating || !mapRef.current || !mapLoaded) return;
+
+    console.log('[MapView] Starting navigation mode with location tracking');
+
+    // Request geolocation permission and start watching position
+    if ('geolocation' in navigator) {
+      const watchId = navigator.geolocation.watchPosition(
+        (position) => {
+          const { latitude, longitude } = position.coords;
+          const newLocation = { lat: latitude, lng: longitude };
+
+          console.log('[MapView] User location updated:', newLocation);
+          setUserLocation(newLocation);
+
+          if (!mapRef.current) return;
+          const map = mapRef.current;
+
+          // Create or update user location marker
+          if (!userLocationMarkerRef.current) {
+            userLocationMarkerRef.current = new google.maps.Marker({
+              position: newLocation,
+              map: map,
+              title: 'Your Location',
+              icon: {
+                path: google.maps.SymbolPath.CIRCLE,
+                scale: 12,
+                fillColor: '#3B82F6',
+                fillOpacity: 1,
+                strokeColor: 'white',
+                strokeWeight: 3,
+              },
+            });
+          } else {
+            userLocationMarkerRef.current.setPosition(newLocation);
+          }
+
+          // Center map on user location
+          map.panTo(newLocation);
+          map.setZoom(18);
+
+          // Calculate distance to next step and update instruction
+          if (route?.legs?.[0]?.steps) {
+            const steps = route.legs[0].steps;
+            if (currentStep < steps.length) {
+              const step = steps[currentStep];
+              const stepLocation = step.start_location;
+              const distance = calculateDistance(
+                newLocation.lat,
+                newLocation.lng,
+                stepLocation.lat,
+                stepLocation.lng
+              );
+
+              // If within 50 meters of next step, move to next instruction
+              if (distance < 0.05) { // 50 meters
+                const nextStepIndex = currentStep + 1;
+                if (nextStepIndex < steps.length) {
+                  setCurrentStep(nextStepIndex);
+                  setNextInstruction(steps[nextStepIndex].html_instructions || "Continue on route");
+                } else {
+                  setNextInstruction("You have arrived at your destination");
+                }
+              } else {
+                setNextInstruction(step.html_instructions || "Continue on route");
+              }
+            }
+          }
+        },
+        (error) => {
+          console.error('[MapView] Geolocation error:', error);
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 5000,
+          maximumAge: 0,
+        }
+      );
+
+      watchIdRef.current = watchId;
+
+      // Cleanup function
+      return () => {
+        if (watchIdRef.current !== null) {
+          navigator.geolocation.clearWatch(watchIdRef.current);
+          watchIdRef.current = null;
+        }
+        if (userLocationMarkerRef.current) {
+          userLocationMarkerRef.current.setMap(null);
+          userLocationMarkerRef.current = null;
+        }
+      };
+    } else {
+      console.error('[MapView] Geolocation not supported');
+    }
+  }, [isNavigating, route, currentStep, mapLoaded]);
+
+  // Show user location marker when not navigating
+  useEffect(() => {
+    if (!mapRef.current || isNavigating || !userLocation || !mapLoaded) return;
+
+    const map = mapRef.current;
+
+    // Create or update user location marker
+    if (!userLocationMarkerRef.current) {
+      console.log('[MapView] Adding user location marker at:', userLocation);
+
+      userLocationMarkerRef.current = new google.maps.Marker({
+        position: userLocation,
+        map: map,
+        title: 'Your Location',
+        icon: {
+          path: google.maps.SymbolPath.CIRCLE,
+          scale: 10,
+          fillColor: '#3B82F6',
+          fillOpacity: 0.8,
+          strokeColor: 'white',
+          strokeWeight: 2,
+        },
+      });
+    } else {
+      userLocationMarkerRef.current.setPosition(userLocation);
+    }
+
+    return () => {
+      // Don't remove the marker here - only remove when component unmounts or enters navigation mode
+    };
+  }, [userLocation, isNavigating, mapLoaded]);
+
+  // Toggle between overview and navigation view (like Google Maps)
   const toggleNavigationView = () => {
-    if (!mapRef.current) return;
+    if (!mapRef.current || !mapLoaded) return;
 
     const map = mapRef.current;
 
     if (!isNavigationView) {
-      // Switch to navigation/street view
-      map.easeTo({
-        pitch: 70, // More tilted, closer to ground level
-        zoom: 17.5, // Closer zoom for street view
-        bearing: route ? 0 : map.getBearing(), // Align with route direction if available
-        duration: 1000,
-      });
+      // Switch to navigation mode - tilted view following user location
+      const centerLocation = userLocation || (route?.legs?.[0]?.start_location
+        ? { lat: route.legs[0].start_location.lat, lng: route.legs[0].start_location.lng }
+        : null);
+
+      if (centerLocation) {
+        // Navigation mode: tilted camera, higher zoom, centered on user
+        map.setTilt(45); // Tilt map for 3D perspective
+        map.setZoom(18); // Close-up zoom for navigation
+        map.panTo(centerLocation);
+
+        // Set map type to hybrid for better navigation context
+        map.setMapTypeId(google.maps.MapTypeId.ROADMAP);
+      }
       setIsNavigationView(true);
     } else {
-      // Switch back to overview
-      map.easeTo({
-        pitch: 45,
-        zoom: route ? map.getZoom() : 15,
-        duration: 1000,
-      });
+      // Switch back to overview mode
+      map.setTilt(0); // Flat map view
+
+      if (route) {
+        // If there's a route, fit to route bounds
+        const decodedPath = google.maps.geometry.encoding.decodePath(route.overview_polyline.points);
+        const bounds = new google.maps.LatLngBounds();
+        decodedPath.forEach((point) => {
+          bounds.extend(point);
+        });
+        map.fitBounds(bounds, { padding: 50 });
+      } else {
+        // Otherwise, zoom out to standard view
+        map.setZoom(15);
+      }
       setIsNavigationView(false);
     }
   };
 
-  const accessToken = import.meta.env.VITE_MAPBOX_ACCESS_TOKEN;
+  const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
 
-  if (!accessToken) {
+  if (!apiKey) {
     return (
       <div className="relative w-full h-full bg-muted/30 rounded-md overflow-hidden border border-border flex items-center justify-center">
         <div className="text-center space-y-4 p-6">
           <Navigation className="w-12 h-12 mx-auto text-muted-foreground" />
           <div className="space-y-2">
-            <p className="text-sm font-medium text-foreground">Mapbox Access Token Required</p>
+            <p className="text-sm font-medium text-foreground">Google Maps API Key Required</p>
             <p className="text-xs text-muted-foreground max-w-xs">
-              Add VITE_MAPBOX_ACCESS_TOKEN to your environment variables
+              Add VITE_GOOGLE_MAPS_API_KEY to your environment variables
             </p>
           </div>
         </div>
@@ -347,13 +592,38 @@ export default function MapView({ route, stops = [] }: MapViewProps) {
     <div className="relative w-full h-full rounded-md overflow-hidden border border-border" style={{ minHeight: '500px' }}>
       <div ref={mapContainerRef} className="w-full h-full" style={{ minHeight: '500px' }} />
 
-      {/* View Toggle Button */}
+      {/* Navigation Instructions Overlay */}
+      {isNavigating && nextInstruction && (
+        <div className="absolute top-6 left-6 right-6 z-10">
+          <div className="bg-background/95 backdrop-blur-sm border border-border rounded-lg shadow-xl p-4">
+            <div className="flex items-start gap-3">
+              <div className="mt-1">
+                <Navigation className="w-6 h-6 text-primary" />
+              </div>
+              <div className="flex-1">
+                <div
+                  className="text-base font-medium text-foreground"
+                  dangerouslySetInnerHTML={{ __html: nextInstruction }}
+                />
+                {route?.legs?.[0]?.steps?.[currentStep]?.distance?.text && (
+                  <p className="text-sm text-muted-foreground mt-1">
+                    In {route.legs[0].steps[currentStep].distance.text}
+                  </p>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Navigation Mode Toggle Button */}
       <div className="absolute bottom-6 right-6 z-10">
         <Button
           onClick={toggleNavigationView}
           size="lg"
           className="shadow-lg"
           variant={isNavigationView ? "default" : "secondary"}
+          disabled={!mapLoaded}
         >
           {isNavigationView ? (
             <>
@@ -362,8 +632,8 @@ export default function MapView({ route, stops = [] }: MapViewProps) {
             </>
           ) : (
             <>
-              <Eye className="w-5 h-5 mr-2" />
-              Street View
+              <Navigation className="w-5 h-5 mr-2" />
+              Navigation
             </>
           )}
         </Button>
@@ -372,42 +642,15 @@ export default function MapView({ route, stops = [] }: MapViewProps) {
   );
 }
 
-// Decode Google's encoded polyline format
-function decodePolyline(encoded: string): [number, number][] {
-  const points: [number, number][] = [];
-  let index = 0;
-  const len = encoded.length;
-  let lat = 0;
-  let lng = 0;
-
-  while (index < len) {
-    let b;
-    let shift = 0;
-    let result = 0;
-
-    do {
-      b = encoded.charCodeAt(index++) - 63;
-      result |= (b & 0x1f) << shift;
-      shift += 5;
-    } while (b >= 0x20);
-
-    const dlat = (result & 1) !== 0 ? ~(result >> 1) : result >> 1;
-    lat += dlat;
-
-    shift = 0;
-    result = 0;
-
-    do {
-      b = encoded.charCodeAt(index++) - 63;
-      result |= (b & 0x1f) << shift;
-      shift += 5;
-    } while (b >= 0x20);
-
-    const dlng = (result & 1) !== 0 ? ~(result >> 1) : result >> 1;
-    lng += dlng;
-
-    points.push([lat / 1e5, lng / 1e5]);
-  }
-
-  return points;
+// Calculate distance between two points in kilometers using Haversine formula
+function calculateDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371; // Radius of the Earth in kilometers
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c; // Distance in kilometers
 }

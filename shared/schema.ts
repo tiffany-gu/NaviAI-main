@@ -19,6 +19,13 @@ export const tripRequests = pgTable("trip_requests", {
       priceLevel?: string;
       kidFriendly?: boolean;
       openNow?: boolean;
+      vegetarian?: boolean;
+      vegan?: boolean;
+    };
+    requestedStops?: {
+      gas?: boolean;
+      restaurant?: boolean;
+      scenic?: boolean;
     };
   }>(),
   route: jsonb("route").$type<any>(),
