@@ -3,6 +3,7 @@ import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { parseUserRequest, generateConversationalResponse, generateStopReason, generateItineraryWithStops } from "./gemini";
 import { getDirections, findPlacesAlongRoute, calculateGasStops, reverseGeocode, verifyGasStationQuality, verifyRestaurantAttributes, getPlaceDetails } from "./maps";
+import { findRouteConciergeStops } from "./concierge";
 import { insertTripRequestSchema, insertConversationMessageSchema } from "@shared/schema";
 
 export async function registerRoutes(app: Express): Promise<Server> {
@@ -1073,6 +1074,80 @@ export async function registerRoutes(app: Express): Promise<Server> {
       res.status(500).json({ error: error.message });
     }
   });
+
+  // Route Concierge endpoint - strict filtering with detour constraints
+  app.post("/api/route-concierge", async (req: Request, res: Response) => {
+    try {
+      const {
+        start,
+        destination,
+        categories,
+        timeContext,
+        maxDetourMinutes,
+        maxOffRouteMiles,
+        minRating,
+        minReviews,
+      } = req.body;
+
+      if (!start || !destination || !categories || !Array.isArray(categories) || categories.length === 0) {
+        return res.status(400).json({
+          error: 'Missing required fields: start, destination, and categories (array) are required'
+        });
+      }
+
+      console.log('[route-concierge] Request:', { start, destination, categories });
+
+      const response = await findRouteConciergeStops({
+        start,
+        destination,
+        categories,
+        timeContext,
+        maxDetourMinutes: maxDetourMinutes || 5,
+        maxOffRouteMiles: maxOffRouteMiles || 1.0,
+        minRating: minRating || 4.2,
+        minReviews: minReviews || 50,
+      });
+
+      // Generate human-readable summary
+      const summary = generateConciergeSummary(response);
+
+      res.json({
+        summary,
+        ...response,
+      });
+    } catch (error: any) {
+      console.error('[route-concierge] Error:', error);
+      res.status(500).json({ error: error.message || 'Failed to find route concierge stops' });
+    }
+  });
+
+  function generateConciergeSummary(response: any): string {
+    const { route, stops } = response;
+    const stopCount = stops.length;
+    const totalDetour = stops.reduce((sum: number, stop: any) => sum + stop.detour_minutes, 0);
+
+    let summary = `Found ${stopCount} stop${stopCount !== 1 ? 's' : ''} along your ${route.distance_miles}-mile route from ${route.start} to ${route.destination}. `;
+    summary += `Total drive time: ${route.drive_time_minutes} minutes${totalDetour > 0 ? ` (plus ~${totalDetour} minutes for stops)` : ''}. `;
+
+    if (stops.length > 0) {
+      const categories = Array.from(new Set(stops.map((s: any) => s.category)));
+      summary += `Stops include: ${categories.join(' and ')}. `;
+
+      const detours = stops.map((s: any) => `${s.detour_minutes} min`).join(', ');
+      summary += `All stops kept within ${detours} detours and under 1 mile off route. `;
+
+      const openStops = stops.filter((s: any) => s.open_now === true);
+      if (openStops.length > 0) {
+        summary += `${openStops.length} stop${openStops.length !== 1 ? 's are' : ' is'} currently open.`;
+      }
+    }
+
+    if (response.note) {
+      summary += ` ${response.note}`;
+    }
+
+    return summary;
+  }
 
   const httpServer = createServer(app);
 

@@ -3,8 +3,10 @@ import fetch from 'node-fetch';
 // Using REST API directly instead of SDK to avoid auth issues
 // Get env variables at runtime instead of module load time
 const getGeminiApiKey = () => process.env.AI_INTEGRATIONS_GEMINI_API_KEY!;
-// Use v1beta for Google Maps grounding support (required for grounding features)
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
+// Use v1beta for Google Search grounding support (required for grounding features)
+const GEMINI_API_URL_V1BETA = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
+// Use v1 for standard API calls (generateStopReason doesn't need grounding)
+const GEMINI_API_URL_V1 = 'https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent';
 
 interface TripParameters {
   origin?: string;
@@ -201,8 +203,9 @@ IMPORTANT:
   console.log('Calling Gemini API with key:', apiKey ? `${apiKey.substring(0, 10)}...` : 'undefined');
 
   try {
-    // Use Google Search grounding with Google Maps data to help resolve location names
-    const requestBody = {
+    // Try v1beta with Google Search grounding first, fallback to v1 if not available
+    // Note: v1beta may not support all models, so we'll try v1beta first and fallback to v1
+    let requestBody = {
       contents: [{
         parts: [{
           text: prompt
@@ -220,13 +223,44 @@ IMPORTANT:
       }
     };
 
-    const response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
+    // Try v1beta first for Google Search grounding
+    let response = await fetch(`${GEMINI_API_URL_V1BETA}?key=${apiKey}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(requestBody)
     });
+
+    // If v1beta fails with 404 (model not found), fallback to v1 without grounding
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.warn('[parseUserRequest] v1beta API not available, falling back to v1:', errorText);
+      
+      // Remove Google Search grounding and use v1 endpoint
+      requestBody = {
+        contents: [{
+          parts: [{
+            text: prompt
+          }]
+        }],
+        generationConfig: {
+          temperature: 0.2,
+          topK: 40,
+          topP: 0.95,
+          maxOutputTokens: 1024,
+          responseMimeType: 'application/json',
+        }
+      } as any;
+
+      response = await fetch(`${GEMINI_API_URL_V1}?key=${apiKey}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody)
+      });
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -526,25 +560,22 @@ CRITICAL: Use Google Maps grounding to verify ALL claims. Do NOT hallucinate det
       return `${stopName} is perfectly positioned ${location}, offering ${rating} quality service. It's an ideal spot to take a break during your journey.`;
     }
 
-    // Use Google Maps grounding for trustworthy, verified justifications
+    // Use v1 API endpoint (doesn't need Google Search grounding - we already have verified data from Google Maps)
     const requestBody: any = {
       contents: [{
         parts: [{
           text: prompt
         }]
       }],
-      tools: [{
-        googleSearch: {} // Enables Google Search grounding which includes Google Maps data
-      }],
       generationConfig: {
         temperature: 0.7, // Balanced temperature for factual yet engaging responses
         topK: 40,
         topP: 0.95,
-        maxOutputTokens: 400, // Allow for detailed grounded responses
+        maxOutputTokens: 400, // Allow for detailed responses
       }
     };
 
-    const response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
+    const response = await fetch(`${GEMINI_API_URL_V1}?key=${apiKey}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -601,7 +632,7 @@ Extracted parameters: ${JSON.stringify(tripParameters)}
     prompt += `All necessary information is available. Acknowledge the request and let them know you're planning their route.`;
   }
 
-  const response = await fetch(`${GEMINI_API_URL}?key=${getGeminiApiKey()}`, {
+  const response = await fetch(`${GEMINI_API_URL_V1}?key=${getGeminiApiKey()}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -773,7 +804,7 @@ export async function generateItineraryWithStops(
   const apiKey = getGeminiApiKey();
   console.log('Calling Gemini API for itinerary generation with key:', apiKey ? `${apiKey.substring(0, 10)}...` : 'undefined');
 
-  const response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
+  const response = await fetch(`${GEMINI_API_URL_V1}?key=${apiKey}`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
