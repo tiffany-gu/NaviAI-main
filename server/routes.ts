@@ -368,6 +368,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 const station = bestStation.station;
                 const quality = bestStation.quality;
                 
+                // Check if this station is already in the stops array
+                if (stops.find(s => s.name === station.name)) {
+                  console.log(`[find-stops] Skipping duplicate gas station: ${station.name}`);
+                  continue; // Skip to next gas stop position
+                }
+                
                 console.log(`[find-stops] Selected gas station: ${station.name} (score: ${bestStation.score.toFixed(0)})`);
                 console.log(`[find-stops] Verified attributes:`, quality.verifiedAttributes);
 
@@ -1110,10 +1116,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       url.searchParams.append('origin', origin);
       url.searchParams.append('destination', destination);
       if (limitedWaypoints.length > 0) {
+        // optimize:true tells Google to reorder waypoints for the best route
         url.searchParams.append('waypoints', `optimize:true|${waypointsParam}`);
       }
       url.searchParams.append('key', apiKey);
       url.searchParams.append('mode', 'driving');
+      url.searchParams.append('alternatives', 'false'); // Single optimized route
       if (tripRequest.preferences?.avoidTolls) {
         url.searchParams.append('avoid', 'tolls');
       }
@@ -1156,8 +1164,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const newRoute = data.routes[0];
       console.log('[recalculate-route] Successfully calculated route with waypoints');
+      console.log('[recalculate-route] Optimized waypoint_order:', newRoute.waypoint_order);
 
-      // Update trip request with new route (waypoints are included in route response)
+      // Reorder waypoints according to Google's optimization
+      let reorderedWaypoints = limitedWaypoints;
+      if (newRoute.waypoint_order && newRoute.waypoint_order.length > 0) {
+        reorderedWaypoints = newRoute.waypoint_order.map((idx: number) => limitedWaypoints[idx]);
+        console.log('[recalculate-route] Waypoints reordered per Google optimization');
+      }
+
+      // Update trip request with new route
       await storage.updateTripRequest(tripRequestId, {
         route: newRoute,
       });
@@ -1166,7 +1182,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       return res.json({
         route: newRoute,
-        waypoints: limitedWaypoints,
+        waypoints: reorderedWaypoints, // Return in optimized order
       });
     } catch (error: any) {
       console.error('[recalculate-route] Unexpected error:', error);

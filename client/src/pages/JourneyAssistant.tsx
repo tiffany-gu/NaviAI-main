@@ -58,7 +58,7 @@ export default function JourneyAssistant() {
     toggleListening,
     clearTranscription,
   } = useMicrophone({
-    enableWakeWord: false, // Set to true to enable "Hey Journey" wake word
+    enableWakeWord: true, // Set to true to enable "Hey Journey" wake word
     onTranscript: (text) => {
       console.log('[JourneyAssistant] Voice transcript received:', text);
       handleSendMessage(text);
@@ -187,6 +187,7 @@ export default function JourneyAssistant() {
       return await res.json();
     },
     onSuccess: (data: any, variables: string) => {
+      console.log('[planRouteMutation] Route data received, legs:', data.selectedRoute?.legs?.length || 0);
       setRouteData(data.selectedRoute);
       
       const routeMessage: Message = {
@@ -220,7 +221,11 @@ export default function JourneyAssistant() {
       // When stops are found, they're automatically added to the route by the backend
       // So we should track which stops were automatically added
       if (data.route) {
-        console.log('[JourneyAssistant] Updating route with waypoints from find-stops:', data.route);
+        console.log('[JourneyAssistant] Updating route with waypoints from find-stops');
+        console.log('[JourneyAssistant] Route legs:', data.route.legs?.length || 0);
+        data.route.legs?.forEach((leg: any, i: number) => {
+          console.log(`[JourneyAssistant] Leg ${i + 1}: ${leg.start_address} → ${leg.end_address}`);
+        });
         setRouteData(data.route);
         
         // If the backend automatically recalculated the route with stops,
@@ -440,11 +445,31 @@ export default function JourneyAssistant() {
       }
     },
     onSuccess: (data: any, variables: { tripRequestId: string; waypoints: Array<{ name: string; location: { lat: number; lng: number } }> }) => {
-      console.log('[recalculateRoute] Route updated with waypoints:', data.route);
+      console.log('[recalculateRoute] Route updated with waypoints');
+      console.log('[recalculateRoute] Route legs:', data.route?.legs?.length || 0);
+      console.log('[recalculateRoute] Optimized waypoint_order:', data.route?.waypoint_order);
+      data.route?.legs?.forEach((leg: any, i: number) => {
+        console.log(`[recalculateRoute] Leg ${i + 1}: ${leg.start_address} → ${leg.end_address}`);
+      });
       setRouteData(data.route);
       
-      // Use the waypoints from the mutation variables to get accurate count
-      const stopCount = variables.waypoints.length;
+      // Update addedStops with optimized order from backend
+      if (data.waypoints && data.waypoints.length > 0) {
+        const reorderedStops = data.waypoints.map((wp: any) => {
+          const existingStop = addedStops.find(s => s.name === wp.name);
+          return existingStop || {
+            type: 'waypoint',
+            name: wp.name,
+            location: wp.location,
+            category: 'stop',
+          };
+        });
+        setAddedStops(reorderedStops);
+        console.log('[recalculateRoute] Stops reordered per Google optimization');
+      }
+      
+      // Use the waypoints from response (already reordered)
+      const stopCount = data.waypoints?.length || variables.waypoints.length;
       
       // Calculate updated travel time
       const totalDuration = data.route?.legs?.reduce((sum: number, leg: any) => sum + (leg.duration?.value || 0), 0) || 0;
@@ -489,7 +514,7 @@ export default function JourneyAssistant() {
 
   return (
     <div className="flex flex-col h-screen bg-background">
-      <AppHeader isRecording={isRecording} />
+      <AppHeader isListening={isListening} isRecording={isRecording} />
 
       <div className="flex-1 flex overflow-hidden">
         <div className="w-[40%] border-r border-border flex flex-col">

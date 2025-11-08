@@ -51,17 +51,20 @@ export default function StopCard({
   onSkip,
 }: StopCardProps) {
   const [isOpen, setIsOpen] = useState(true); // Default to open to showcase grounded justifications
-  const Icon = iconMap[type];
+  // Normalize type to lowercase and ensure we have a valid icon
+  const normalizedType = type.toLowerCase() as StopType;
+  const Icon = iconMap[normalizedType] || iconMap.gas; // Fallback to gas icon if type is invalid
+  const displayType = normalizedType;
 
   return (
-    <Card className="overflow-visible border-l-4 border-l-primary/30" data-testid={`card-stop-${type}`}>
+    <Card className="overflow-visible border-l-4 border-l-primary/30" data-testid={`card-stop-${displayType}`}>
       <div className="p-4 space-y-3">
         <div className="flex items-start gap-3">
-          <div className={`mt-0.5 ${colorMap[type]}`}>
+          <div className={`mt-0.5 ${colorMap[displayType] || colorMap.gas}`}>
             <Icon className="w-5 h-5" />
           </div>
           <div className="flex-1 min-w-0 space-y-1">
-            <h3 className="text-sm font-semibold truncate" data-testid={`text-stop-name-${type}`}>{name}</h3>
+            <h3 className="text-sm font-semibold truncate" data-testid={`text-stop-name-${displayType}`}>{name}</h3>
             <p className="text-sm text-muted-foreground">{category}</p>
             <div className="flex items-center gap-2 flex-wrap text-xs">
               {rating && (
@@ -105,7 +108,7 @@ export default function StopCard({
               variant="ghost"
               size="sm"
               className="w-full justify-between h-8 font-semibold"
-              data-testid={`button-toggle-reason-${type}`}
+              data-testid={`button-toggle-reason-${displayType}`}
             >
               <span className="text-xs font-semibold text-primary">Why this stop?</span>
               <ChevronDown
@@ -128,11 +131,11 @@ export default function StopCard({
             className="flex-1"
             onClick={() => {
               if (onAddToRoute && location) {
-                onAddToRoute({ type, name, location });
+                onAddToRoute({ type: displayType, name, location });
               }
             }}
             disabled={!location || !onAddToRoute}
-            data-testid={`button-add-stop-${type}`}
+            data-testid={`button-add-stop-${displayType}`}
           >
             Add to Route
           </Button>
@@ -144,7 +147,7 @@ export default function StopCard({
                 onSkip();
               }
             }}
-            data-testid={`button-skip-stop-${type}`}
+            data-testid={`button-skip-stop-${displayType}`}
           >
             Skip
           </Button>

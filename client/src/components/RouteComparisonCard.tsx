@@ -50,23 +50,40 @@ export default function RouteComparisonCard({
             Route Stops
           </p>
           <div className="space-y-1 max-h-32 overflow-y-auto">
-            {addedStops.map((stop, index) => (
-              <div key={index} className="flex items-center gap-2 text-xs group">
-                <span className="flex items-center justify-center w-5 h-5 rounded-full bg-primary text-primary-foreground text-xs font-semibold flex-shrink-0">
-                  {index + 1}
-                </span>
-                <span className="text-foreground truncate flex-1">{stop.name}</span>
-                {onRemoveStop && (
-                  <button
-                    onClick={() => onRemoveStop(stop)}
-                    className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-destructive/10 rounded"
-                    title="Remove from route"
-                  >
-                    <X className="w-3 h-3 text-destructive" />
-                  </button>
-                )}
-              </div>
-            ))}
+            {addedStops.map((stop, index) => {
+              // Get category emoji
+              const getCategoryEmoji = (cat: string | undefined) => {
+                if (!cat) return '📍';
+                const category = cat.toLowerCase();
+                if (category.includes('chinese') || category.includes('noodle')) return '🍜';
+                if (category.includes('boba') || category.includes('bubble') || category.includes('tea')) return '🧋';
+                if (category.includes('sushi') || category.includes('japanese')) return '🍣';
+                if (category.includes('gas') || category.includes('fuel')) return '⛽';
+                if (category.includes('coffee')) return '☕';
+                if (category.includes('restaurant') || category.includes('food')) return '🍽️';
+                if (category.includes('scenic') || category.includes('viewpoint')) return '📸';
+                return '📍';
+              };
+
+              return (
+                <div key={index} className="flex items-center gap-2 text-xs group">
+                  <span className="flex items-center justify-center w-5 h-5 rounded-full bg-primary text-primary-foreground text-xs font-semibold flex-shrink-0">
+                    {index + 1}
+                  </span>
+                  <span className="text-base flex-shrink-0">{getCategoryEmoji(stop.category || stop.type)}</span>
+                  <span className="text-foreground truncate flex-1">{stop.name}</span>
+                  {onRemoveStop && (
+                    <button
+                      onClick={() => onRemoveStop(stop)}
+                      className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-destructive/10 rounded"
+                      title="Remove from route"
+                    >
+                      <X className="w-3 h-3 text-destructive" />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

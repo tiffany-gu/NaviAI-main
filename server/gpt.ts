@@ -453,6 +453,31 @@ Additional optional parameters to extract:
   - If user mentions multiple stop types, include all of them: {"requestedStops": {"gas": true, "restaurant": true}}
   - Even vague mentions like "stops along the way" / "places to stop" / "take a break" / "rest stop" should trigger: {"requestedStops": {"restaurant": true}}
 
+- Custom Stop Types (CRITICAL - Extract specific types of places):
+  For specific place types, use customStops array with keywords and place types:
+  
+  - "sushi" / "sushi place" / "sushi restaurant" / "sushi bar" / "japanese food" → customStops: [{"id": "sushi", "label": "Sushi Restaurant", "keywords": ["sushi", "japanese", "sashimi", "roll", "nigiri"], "placeTypes": ["sushi_restaurant", "japanese_restaurant", "restaurant"], "minRating": 4.0}]
+  
+  - "coffee" / "coffee shop" / "café" / "coffee place" / "espresso" → customStops: [{"id": "coffee", "label": "Coffee Shop", "keywords": ["coffee", "espresso", "latte", "café"], "placeTypes": ["cafe", "coffee_shop"], "minRating": 4.0}]
+  
+  - "boba" / "bubble tea" / "milk tea" / "boba place" → customStops: [{"id": "boba", "label": "Bubble Tea", "keywords": ["boba", "bubble tea", "milk tea", "tapioca"], "placeTypes": ["cafe", "tea_house", "bubble_tea_shop"], "minRating": 4.0}]
+  
+  - "pizza" / "pizza place" / "pizzeria" → customStops: [{"id": "pizza", "label": "Pizza Place", "keywords": ["pizza", "pizzeria", "italian"], "placeTypes": ["pizza_restaurant", "italian_restaurant"], "minRating": 4.0}]
+  
+  - "burger" / "burger place" / "hamburger" → customStops: [{"id": "burger", "label": "Burger Place", "keywords": ["burger", "hamburger", "cheeseburger"], "placeTypes": ["hamburger_restaurant", "american_restaurant", "fast_food_restaurant"], "minRating": 4.0}]
+  
+  IMPORTANT: If user mentions both generic type (e.g., "restaurant") and specific type (e.g., "sushi"), use the specific type in customStops instead of generic restaurant
+
+- Stop Placement Preferences (Extract location requirements for stops):
+  - "nearby" / "close by" / "close to me" / "near here" / "right around" → means stop should be within 5 minutes from current location
+  - "along the way" / "on the way" / "on route" / "en route" / "on the path" → means stop should be along the main route, not off route
+  - Store these as maxDetourMinutes in customStops: "nearby" = 5 minutes, "along the way" = default
+
+- Timing Constraints (Extract arrival time preferences):
+  - "arrive in 2 hours" / "get there in 2 hours" / "reach in about 2 hours" → {"arrivalTimeHours": 2}
+  - "arrive by 3pm" / "get there by 5:00" → {"arrivalTime": "3:00 PM"} (extract specific time)
+  - "quick trip" / "fast" / "fastest route" → {"preferences": {"fast": true}}
+
 - Restaurant Preferences (Extract specific requirements from user's description):
   - "mediterranean food" / "mediterranean restaurant" / "good mediterranean food" → preferences: {"restaurantPreferences": {"cuisine": "mediterranean"}}
   - "Italian food" → preferences: {"restaurantPreferences": {"cuisine": "italian"}}
@@ -527,6 +552,59 @@ Output: {
     "requestedStops": {
       "scenic": true
     }
+  }
+}
+
+Input: "Hey Journey, I want to go to miami, add a sushi place and gas station along the way. Can the gas station be close nearby and the sushi place be on the way to Miami so that we can reach there in about 2 hours"
+Output: {
+  "destination": "Miami, FL",
+  "action": "useCurrentLocation",
+  "arrivalTimeHours": 2,
+  "preferences": {
+    "requestedStops": {
+      "gas": true
+    },
+    "customStops": [
+      {
+        "id": "gas_nearby",
+        "label": "Gas Station",
+        "keywords": ["gas", "fuel", "petrol", "chevron", "shell", "bp"],
+        "placeTypes": ["gas_station"],
+        "minRating": 4.0,
+        "maxDetourMinutes": 5
+      },
+      {
+        "id": "sushi",
+        "label": "Sushi Restaurant",
+        "keywords": ["sushi", "japanese", "sashimi", "roll", "nigiri"],
+        "placeTypes": ["sushi_restaurant", "japanese_restaurant", "restaurant"],
+        "minRating": 4.0
+      }
+    ]
+  }
+}
+
+Input: "to boston with coffee shop and burger place along the way"
+Output: {
+  "destination": "Boston, MA",
+  "action": "useCurrentLocation",
+  "preferences": {
+    "customStops": [
+      {
+        "id": "coffee",
+        "label": "Coffee Shop",
+        "keywords": ["coffee", "espresso", "latte", "café"],
+        "placeTypes": ["cafe", "coffee_shop"],
+        "minRating": 4.0
+      },
+      {
+        "id": "burger",
+        "label": "Burger Place",
+        "keywords": ["burger", "hamburger", "cheeseburger"],
+        "placeTypes": ["hamburger_restaurant", "american_restaurant"],
+        "minRating": 4.0
+      }
+    ]
   }
 }
 
@@ -745,51 +823,79 @@ function buildFallbackStopReason(
     stopDetails.address ||
     '';
 
-  const locationText = location ? `located at ${location}` : 'along your route';
-  const stopTypeLabel = (() => {
-    const normalized = (stopType || '').toLowerCase();
-    if (normalized === 'gas') {
-      return 'refueling option';
-    }
-    if (normalized === 'restaurant' || normalized === 'food') {
-      return 'dining option';
-    }
-    if (normalized === 'scenic') {
-      return 'scenic viewpoint';
-    }
-    return 'stop';
-  })();
-
+  const normalizedType = (stopType || '').toLowerCase();
+  const isGasStation = normalizedType === 'gas';
+  
   const sentences: string[] = [];
   
-  // Build a concise, specific reason
-  let mainReason = `${stopName} is a well-positioned ${stopTypeLabel}`;
-  
-  // Add rating if available
-  if (typeof stopDetails.rating === 'number') {
-    mainReason += ` with a ${stopDetails.rating.toFixed(1)}★ rating`;
-    if (
-      typeof stopDetails.user_ratings_total === 'number' &&
-      stopDetails.user_ratings_total > 0
-    ) {
-      mainReason += ` from ${formatNumber(stopDetails.user_ratings_total)} reviews`;
+  // For gas stations, use more natural language and focus on practical benefits
+  if (isGasStation) {
+    // Build rating information
+    if (typeof stopDetails.rating === 'number') {
+      const ratingText = stopDetails.rating === 5.0 
+        ? 'perfect 5.0 rating'
+        : `${stopDetails.rating.toFixed(1)}-star rating`;
+      
+      let ratingSentence = `Selected for its ${ratingText}`;
+      if (typeof stopDetails.user_ratings_total === 'number' && stopDetails.user_ratings_total > 0) {
+        ratingSentence += ` from ${formatNumber(stopDetails.user_ratings_total)} review${stopDetails.user_ratings_total !== 1 ? 's' : ''}`;
+      }
+      ratingSentence += '.';
+      sentences.push(ratingSentence);
     }
-  }
-  mainReason += '.';
-  sentences.push(mainReason);
+    
+    // Add verified attributes if available
+    if (Array.isArray(stopDetails.verifiedAttributes) && stopDetails.verifiedAttributes.length > 0) {
+      const attributesText = stopDetails.verifiedAttributes.join(', ');
+      sentences.push(`Offers ${attributesText}.`);
+    } else if (stopDetails.is24Hours) {
+      sentences.push('Open 24/7 for your convenience.');
+    }
+    
+    // Add location if available
+    if (location) {
+      sentences.push(`Conveniently located ${location}.`);
+    } else {
+      sentences.push('Well-positioned along your route for refueling.');
+    }
+  } else {
+    // For other stop types, use the original format
+    const locationText = location ? `located at ${location}` : 'along your route';
+    const stopTypeLabel = (() => {
+      if (normalizedType === 'restaurant' || normalizedType === 'food') {
+        return 'dining option';
+      }
+      if (normalizedType === 'scenic') {
+        return 'scenic viewpoint';
+      }
+      return 'stop';
+    })();
 
-  // Add verified attributes if available (most important info)
-  if (
-    Array.isArray(stopDetails.verifiedAttributes) &&
-    stopDetails.verifiedAttributes.length > 0
-  ) {
-    sentences.push(
-      `Verified features: ${stopDetails.verifiedAttributes.join(', ')}.`
-    );
-  }
+    let mainReason = `${stopName} is a well-positioned ${stopTypeLabel}`;
+    
+    if (typeof stopDetails.rating === 'number') {
+      mainReason += ` with a ${stopDetails.rating.toFixed(1)}★ rating`;
+      if (
+        typeof stopDetails.user_ratings_total === 'number' &&
+        stopDetails.user_ratings_total > 0
+      ) {
+        mainReason += ` from ${formatNumber(stopDetails.user_ratings_total)} reviews`;
+      }
+    }
+    mainReason += '.';
+    sentences.push(mainReason);
 
-  // Add location detail
-  sentences.push(`Conveniently ${locationText}.`);
+    if (
+      Array.isArray(stopDetails.verifiedAttributes) &&
+      stopDetails.verifiedAttributes.length > 0
+    ) {
+      sentences.push(
+        `Verified features: ${stopDetails.verifiedAttributes.join(', ')}.`
+      );
+    }
+
+    sentences.push(`Conveniently ${locationText}.`);
+  }
 
   return sentences.filter(Boolean).join(' ');
 }
@@ -828,20 +934,34 @@ export async function generateStopReason(
       groundingInstructions = `Use Google Maps data to verify claims about this location.`;
   }
 
-  const prompt = `You are an expert travel advisor. Generate a trustworthy, specific justification for why this stop was selected, using ONLY the provided data (ratings, reviews, attributes).
-
-LOCATION TO ANALYZE:
+  // Build location data section - exclude types for gas stations to avoid technical categorization mentions
+  const shouldIncludeTypes = stopType.toLowerCase() !== 'gas';
+  const locationDataSection = `LOCATION TO ANALYZE:
 - Name: ${stopName}
 - Type: ${stopType}
 - Location: ${location}
 - Initial Rating: ${rating}
-${stopDetails.types ? `- Categories: ${stopDetails.types.slice(0, 3).join(', ')}` : ''}
+${shouldIncludeTypes && stopDetails.types ? `- Categories: ${stopDetails.types.slice(0, 3).join(', ')}` : ''}
 ${stopDetails.opening_hours?.open_now !== undefined ? `- Status: ${stopDetails.opening_hours.open_now ? 'Open' : 'Closed'}` : ''}
 ${stopDetails.price_level ? `- Price level: ${'$'.repeat(stopDetails.price_level)}` : ''}
 ${stopDetails.user_ratings_total ? `- Review count: ${stopDetails.user_ratings_total}` : ''}
 ${stopDetails.verifiedAttributes && stopDetails.verifiedAttributes.length > 0 ? `- VERIFIED ATTRIBUTES (from Google Maps): ${stopDetails.verifiedAttributes.join(', ')}` : ''}
 ${stopDetails.is24Hours ? `- VERIFIED: Open 24/7 (confirmed from Google Maps)` : ''}
-${stopDetails.hasCleanFacilities ? `- VERIFIED: Clean facilities (confirmed from Google Maps reviews)` : ''}
+${stopDetails.hasCleanFacilities ? `- VERIFIED: Clean facilities (confirmed from Google Maps reviews)` : ''}`;
+
+  // Add specific instructions for gas stations to avoid mentioning categorization
+  const gasStationSpecificInstructions = stopType.toLowerCase() === 'gas' 
+    ? `\n\nIMPORTANT FOR GAS STATIONS:
+- Focus on practical benefits: rating, 24/7 operation, clean facilities, location convenience
+- Do NOT mention what the location is "categorized as" or "listed as"
+- Do NOT include technical categorization details like "gas_station, convenience_store, car_repair"
+- Write in natural, user-friendly language about why this is a good refueling stop
+- Emphasize verified attributes like 24/7 operation and clean facilities if available`
+    : '';
+
+  const prompt = `You are an expert travel advisor. Generate a trustworthy, specific justification for why this stop was selected, using ONLY the provided data (ratings, reviews, attributes).
+
+${locationDataSection}
 
 ROUTE CONTEXT: ${routeContext}
 
@@ -863,13 +983,15 @@ Example format (plain text bullet points):
 • Open 24/7 with clean facilities confirmed in recent reviews
 • Located 0.3 miles off I-5 with easy re-entry
 
-${typeSpecificContext}
+${typeSpecificContext}${gasStationSpecificInstructions}
 
 CRITICAL: 
 - Do NOT use asterisks or any markdown formatting
 - Format as bullet points (use • or -)
 - Do NOT invent facts beyond what's provided
-- Keep it concise (2-3 bullet points)`;
+- Do NOT mention categorization, listing, or technical category details
+- Keep it concise (2-3 bullet points)
+- Write in natural, conversational language`;
 
   const fallbackReason = buildFallbackStopReason(
     stopType,
