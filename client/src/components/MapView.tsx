@@ -198,8 +198,18 @@ export default function MapView({ route, stops = [], addedStops = [], isNavigati
           strokeColor: 'white',
           strokeWeight: 3,
         },
+        label: {
+          text: 'S',
+          color: 'white',
+          fontWeight: 'bold',
+        },
         zIndex: 5,
       });
+
+      const startInfoWindow = new google.maps.InfoWindow({
+        content: `<div style="font-weight:600;">Start</div><div>${route.legs[0]?.start_address || ''}</div>`,
+      });
+      startMarker.addListener('click', () => startInfoWindow.open(map, startMarker));
 
       markersRef.current.push(startMarker);
 
@@ -217,8 +227,18 @@ export default function MapView({ route, stops = [], addedStops = [], isNavigati
           strokeColor: 'white',
           strokeWeight: 3,
         },
+        label: {
+          text: 'D',
+          color: 'white',
+          fontWeight: 'bold',
+        },
         zIndex: 5,
       });
+
+      const endInfoWindow = new google.maps.InfoWindow({
+        content: `<div style="font-weight:600;">Destination</div><div>${route.legs[route.legs.length - 1]?.end_address || ''}</div>`,
+      });
+      endMarker.addListener('click', () => endInfoWindow.open(map, endMarker));
 
       markersRef.current.push(endMarker);
     } else if (route.legs && route.legs[0] && !isNavigating && addedStops && addedStops.length > 0) {
@@ -239,8 +259,18 @@ export default function MapView({ route, stops = [], addedStops = [], isNavigati
           strokeColor: 'white',
           strokeWeight: 2,
         },
+        label: {
+          text: 'S',
+          color: 'white',
+          fontWeight: 'bold',
+        },
         zIndex: 5,
       });
+
+      const startInfoWindow = new google.maps.InfoWindow({
+        content: `<div style="font-weight:600;">Start</div><div>${route.legs[0]?.start_address || ''}</div>`,
+      });
+      startMarker.addListener('click', () => startInfoWindow.open(map, startMarker));
 
       markersRef.current.push(startMarker);
 
@@ -257,8 +287,18 @@ export default function MapView({ route, stops = [], addedStops = [], isNavigati
           strokeColor: 'white',
           strokeWeight: 2,
         },
+        label: {
+          text: 'D',
+          color: 'white',
+          fontWeight: 'bold',
+        },
         zIndex: 5,
       });
+
+      const endInfoWindow = new google.maps.InfoWindow({
+        content: `<div style="font-weight:600;">Destination</div><div>${route.legs[route.legs.length - 1]?.end_address || ''}</div>`,
+      });
+      endMarker.addListener('click', () => endInfoWindow.open(map, endMarker));
 
       markersRef.current.push(endMarker);
     }

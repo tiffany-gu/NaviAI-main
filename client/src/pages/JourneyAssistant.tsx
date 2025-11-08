@@ -88,10 +88,15 @@ export default function JourneyAssistant() {
       // Check if message is asking for route to a destination (uses current location)
       const toPattern = /(?:plan\s+(?:a\s+)?(?:trip|route)\s+)?to\s+[a-zA-Z\s,]+/i;
       const fromPattern = /from\s+[a-zA-Z\s,]+\s+to\s+[a-zA-Z\s,]+/i;
+      const myLocationPattern = /(my\s+(current\s+)?location|current\s+location|from\s+here|start\s+here|starting\s+from\s+here)/i;
 
       // Use stored userLocation if available and user is asking for "to X" without "from"
       let locationToSend = null;
-      if (toPattern.test(message) && !fromPattern.test(message)) {
+      const shouldUseCurrentLocation =
+        (toPattern.test(message) && !fromPattern.test(message)) ||
+        myLocationPattern.test(message);
+
+      if (shouldUseCurrentLocation) {
         if (userLocation) {
           locationToSend = userLocation;
           console.log('[chatMutation] Using stored user location:', locationToSend);
