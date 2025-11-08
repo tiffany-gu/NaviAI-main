@@ -9,6 +9,7 @@ import StopCard from "@/components/StopCard";
 import MapView from "@/components/MapView";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/hooks/use-toast";
+import { useMicrophone } from "@/hooks/useMicrophone";
 
 interface Message {
   id: string;
@@ -31,7 +32,6 @@ interface Stop {
 }
 
 export default function JourneyAssistant() {
-  const [isRecording, setIsRecording] = useState(false);
   const [isNavigating, setIsNavigating] = useState(false);
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [messages, setMessages] = useState<Message[]>([
@@ -48,6 +48,23 @@ export default function JourneyAssistant() {
   const [addedStops, setAddedStops] = useState<Array<{ type: string; name: string; location: { lat: number; lng: number }; category?: string }>>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
+
+  // Enhanced voice input with wake word detection and silence monitoring
+  const {
+    isListening,
+    isRecording,
+    transcription,
+    error: micError,
+    toggleListening,
+    clearTranscription,
+  } = useMicrophone({
+    enableWakeWord: false, // Set to true to enable "Hey Journey" wake word
+    onTranscript: (text) => {
+      console.log('[JourneyAssistant] Voice transcript received:', text);
+      handleSendMessage(text);
+      clearTranscription();
+    },
+  });
 
   // Get user location on app load
   useEffect(() => {
@@ -258,49 +275,20 @@ export default function JourneyAssistant() {
     chatMutation.mutate(text);
   };
 
-  const handleVoiceClick = () => {
-    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-      toast({
-        title: "Voice Input Not Supported",
-        description: "Your browser doesn't support voice input. Please type your request.",
-        variant: "destructive",
-      });
-      return;
-    }
+  const handleVoiceClick = async () => {
+    await toggleListening();
+  };
 
-    if (isRecording) {
-      setIsRecording(false);
-      return;
-    }
-
-    setIsRecording(true);
-
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    const recognition = new SpeechRecognition();
-    recognition.lang = 'en-US';
-    recognition.continuous = false;
-
-    recognition.onresult = (event: any) => {
-      const transcript = event.results[0][0].transcript;
-      setIsRecording(false);
-      handleSendMessage(transcript);
-    };
-
-    recognition.onerror = () => {
-      setIsRecording(false);
+  // Show error toast when microphone error occurs
+  useEffect(() => {
+    if (micError) {
       toast({
         title: "Voice Input Error",
-        description: "Couldn't process voice input. Please try again.",
+        description: micError,
         variant: "destructive",
       });
-    };
-
-    recognition.onend = () => {
-      setIsRecording(false);
-    };
-
-    recognition.start();
-  };
+    }
+  }, [micError, toast]);
 
   const calculateRouteComparison = () => {
     if (!routeData || !routeData.legs) return null;
