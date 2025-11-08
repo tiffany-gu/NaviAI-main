@@ -262,17 +262,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // GROUNDED APPROACH: Use real Google Maps Places API data with intelligent filtering
       console.log(`[find-stops] Finding grounded stops for ${routeDistanceMiles.toFixed(0)}-mile route`);
 
-      // Step 1: Find gas stops if user requested them OR if vehicle range requires it
+      // Step 1: Determine which stops to find based on user request AND intelligent defaults
       const requestedStops = tripRequest.preferences?.requestedStops;
       const userWantsGas = requestedStops?.gas === true;
       const userWantsRestaurant = requestedStops?.restaurant === true;
       const userWantsScenic = requestedStops?.scenic === true;
 
-      console.log('[find-stops] User requested stops:', { gas: userWantsGas, restaurant: userWantsRestaurant, scenic: userWantsScenic });
+      // Calculate route duration for intelligent defaults
+      const routeDuration = tripRequest.route.legs?.[0]?.duration?.value || 0;
+      const routeDurationHours = routeDuration / 3600;
 
-      // Calculate if gas stops are needed based on vehicle range OR user request
+      // INTELLIGENT DEFAULTS: Suggest stops based on route characteristics
+      // 1. Restaurant stops for routes > 3 hours (meal break makes sense)
+      const shouldSuggestRestaurant = userWantsRestaurant || routeDurationHours >= 3;
+
+      // 2. Scenic stops for scenic routes or very long routes (> 4 hours)
+      const shouldSuggestScenic = userWantsScenic || tripRequest.preferences?.scenic || routeDurationHours >= 4;
+
+      // 3. Gas stops if explicitly requested, vehicle range requires it, or route is long (>200 miles)
+      const shouldSuggestGas = userWantsGas || routeDistanceMiles >= 200;
+
+      console.log('[find-stops] Stop suggestions:', {
+        userRequested: { gas: userWantsGas, restaurant: userWantsRestaurant, scenic: userWantsScenic },
+        intelligent: { gas: shouldSuggestGas, restaurant: shouldSuggestRestaurant, scenic: shouldSuggestScenic },
+        routeInfo: { distanceMiles: routeDistanceMiles.toFixed(0), durationHours: routeDurationHours.toFixed(1) }
+      });
+
+      // Calculate if gas stops are needed based on vehicle range
       const needsGasByRange = tripRequest.vehicleRange && routeDistanceMiles > 0;
-      let shouldFindGas = userWantsGas;
+      let needsGasStops = shouldSuggestGas; // Start with intelligent default
 
       if (needsGasByRange && tripRequest.vehicleRange) {
         const fuelLevel = tripRequest.fuelLevel ?? 1.0; // Default to full tank
@@ -282,12 +300,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         console.log(`[find-stops] Vehicle range: ${tripRequest.vehicleRange} mi, Current range: ${currentRange.toFixed(0)} mi`);
 
         if (routeDistanceMiles > currentRange - safetyBuffer) {
-          shouldFindGas = true; // Need gas by range calculation
+          needsGasStops = true; // Need gas by range calculation
           console.log(`[find-stops] Gas stop needed due to vehicle range`);
         }
       }
 
-      if (shouldFindGas) {
+      if (needsGasStops) {
         // Need gas stops - calculate positions
         const fuelLevel = tripRequest.fuelLevel ?? 1.0; // Default to full tank
         const vehicleRange = tripRequest.vehicleRange || 300; // Default range
@@ -391,15 +409,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
             }
           }
       } else {
-        console.log('[find-stops] Skipping gas stop search - user did not request gas stops and vehicle range is sufficient');
+        console.log('[find-stops] Skipping gas stop search - not needed based on route distance and vehicle range');
       }
 
-      // Step 2: Find restaurants ONLY if user requested them
-      if (userWantsRestaurant) {
+      // Step 2: Find restaurants if requested OR route is long enough for a meal break
+      if (shouldSuggestRestaurant) {
         const restaurantPrefs = tripRequest.preferences?.restaurantPreferences;
-        const targetRestaurants = 1; // Find 1 restaurant stop if user requested
+        const targetRestaurants = 1; // Find 1 restaurant stop
 
-        console.log(`[find-stops] User requested restaurant stop with preferences:`, restaurantPrefs);
+        console.log(`[find-stops] Finding restaurant stop (requested: ${userWantsRestaurant}, intelligent: ${routeDurationHours >= 3}) with preferences:`, restaurantPrefs);
 
         try {
           // Build search criteria based on user preferences
@@ -540,14 +558,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
           console.error('[find-stops] Error finding restaurants:', error);
         }
       } else {
-        console.log('[find-stops] Skipping restaurant search - user did not request restaurant stops');
+        console.log('[find-stops] Skipping restaurant search - route is short (<3 hours) and not requested');
       }
 
-      // Step 3: Find scenic stops ONLY if user requested them
-      if (userWantsScenic) {
+      // Step 3: Find scenic stops if requested OR route is scenic/very long
+      if (shouldSuggestScenic) {
         const targetScenicStops = 1; // One scenic stop for variety
 
-        console.log(`[find-stops] Finding scenic viewpoints (scenic preference: ${tripRequest.preferences?.scenic})`);
+        console.log(`[find-stops] Finding scenic viewpoints (requested: ${userWantsScenic}, intelligent: ${tripRequest.preferences?.scenic || routeDurationHours >= 4})`);
 
         try {
           const scenicPlaces = await findPlacesAlongRoute(
@@ -589,7 +607,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           console.error('[find-stops] Error finding scenic places:', error);
         }
       } else {
-        console.log('[find-stops] Skipping scenic search - user did not request scenic stops');
+        console.log('[find-stops] Skipping scenic search - route is not scenic and not long enough (<4 hours)');
       }
 
       console.log(`[find-stops] Found ${stops.length} grounded stops total`);

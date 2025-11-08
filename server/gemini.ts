@@ -142,10 +142,11 @@ Additional optional parameters to extract:
   - Route preferences (scenic route) → preferences: {"scenic": true}
 
 - Stop Requests (CRITICAL - Extract what stops the user explicitly wants):
-  - "I want a restaurant" / "restaurant along the way" / "need a place to eat" → preferences: {"requestedStops": {"restaurant": true}}
-  - "gas station" / "need gas" / "fuel stop" → preferences: {"requestedStops": {"gas": true}}
-  - "scenic view" / "scenic stop" / "scenic viewpoint" → preferences: {"requestedStops": {"scenic": true}}
+  - "I want a restaurant" / "restaurant along the way" / "need a place to eat" / "food" / "lunch" / "dinner" / "breakfast" / "hungry" / "eat" → preferences: {"requestedStops": {"restaurant": true}}
+  - "gas station" / "need gas" / "fuel stop" / "refuel" / "fill up" / "gas" → preferences: {"requestedStops": {"gas": true}}
+  - "scenic view" / "scenic stop" / "scenic viewpoint" / "scenic route" / "viewpoints" / "sightseeing" / "attractions" → preferences: {"requestedStops": {"scenic": true}}
   - If user mentions multiple stop types, include all of them: {"requestedStops": {"gas": true, "restaurant": true}}
+  - Even vague mentions like "stops along the way" / "places to stop" / "take a break" / "rest stop" should trigger: {"requestedStops": {"restaurant": true}}
 
 - Restaurant Preferences (Extract specific requirements from user's description):
   - "mediterranean food" / "mediterranean restaurant" / "good mediterranean food" → preferences: {"restaurantPreferences": {"cuisine": "mediterranean"}}
@@ -186,6 +187,40 @@ Output: {
     },
     "restaurantPreferences": {
       "cuisine": "italian"
+    }
+  }
+}
+
+Input: "take me to miami with stops for lunch"
+Output: {
+  "destination": "Miami, FL",
+  "action": "useCurrentLocation",
+  "preferences": {
+    "requestedStops": {
+      "restaurant": true
+    }
+  }
+}
+
+Input: "drive from boston to new york, I'm hungry"
+Output: {
+  "origin": "Boston, MA",
+  "destination": "New York, NY",
+  "preferences": {
+    "requestedStops": {
+      "restaurant": true
+    }
+  }
+}
+
+Input: "scenic route from seattle to portland with viewpoints"
+Output: {
+  "origin": "Seattle, WA",
+  "destination": "Portland, OR",
+  "preferences": {
+    "scenic": true,
+    "requestedStops": {
+      "scenic": true
     }
   }
 }
