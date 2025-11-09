@@ -19,6 +19,10 @@ interface TTSOptions {
   voice_settings?: VoiceSettings;
 }
 
+// Audio queue management
+let isPlaying = false;
+const audioQueue: Array<() => Promise<void>> = [];
+
 /**
  * Convert text to speech using ElevenLabs API
  * @param text - The text to convert to speech
@@ -101,40 +105,105 @@ export async function convertToSpeech(
 }
 
 /**
- * Play text as speech with automatic handling of browser autoplay restrictions
+ * Process the audio queue sequentially
+ */
+async function processQueue(): Promise<void> {
+  if (isPlaying || audioQueue.length === 0) {
+    return;
+  }
+
+  isPlaying = true;
+  const playNext = audioQueue.shift();
+
+  if (playNext) {
+    try {
+      await playNext();
+    } catch (error) {
+      console.error('[ElevenLabs] Error playing queued audio:', error);
+    }
+  }
+
+  isPlaying = false;
+
+  // Process next item in queue
+  if (audioQueue.length > 0) {
+    processQueue();
+  }
+}
+
+/**
+ * Play a single audio element and wait for it to finish
+ */
+async function playAudioAndWait(audio: HTMLAudioElement): Promise<void> {
+  return new Promise((resolve, reject) => {
+    // Set up event listeners
+    const onEnded = () => {
+      console.log('[ElevenLabs] Audio playback completed');
+      cleanup();
+      resolve();
+    };
+
+    const onError = (error: ErrorEvent) => {
+      console.error('[ElevenLabs] Audio playback error:', error);
+      cleanup();
+      reject(error);
+    };
+
+    const cleanup = () => {
+      audio.removeEventListener('ended', onEnded);
+      audio.removeEventListener('error', onError);
+    };
+
+    // Add listeners
+    audio.addEventListener('ended', onEnded);
+    audio.addEventListener('error', onError);
+
+    // Start playback
+    audio.play()
+      .then(() => {
+        console.log('[ElevenLabs] Audio playing');
+      })
+      .catch((error) => {
+        console.warn('[ElevenLabs] Autoplay blocked, will try on next click');
+        // If autoplay is blocked, set up click handler
+        const playOnClick = () => {
+          audio.play().catch(console.error);
+          document.removeEventListener('click', playOnClick);
+        };
+        document.addEventListener('click', playOnClick, { once: true });
+        cleanup();
+        resolve(); // Resolve anyway to continue queue
+      });
+  });
+}
+
+/**
+ * Play text as speech with automatic queuing to prevent overlaps
  * @param text - The text to speak
  * @param options - Optional TTS configuration
- * @returns Promise that resolves when audio starts playing
+ * @returns Promise that resolves when audio is queued
  */
 export async function speakText(
   text: string,
   options: TTSOptions = {}
 ): Promise<void> {
   try {
-    const audio = await convertToSpeech(text, options);
+    // Add to queue
+    audioQueue.push(async () => {
+      try {
+        const audio = await convertToSpeech(text, options);
+        await playAudioAndWait(audio);
+      } catch (error) {
+        console.error('[ElevenLabs] Failed to speak text:', error);
+      }
+    });
 
-    // Try to play automatically
-    try {
-      await audio.play();
-      console.log('[ElevenLabs] Audio playing automatically');
-    } catch (error) {
-      // If autoplay is blocked, log a message
-      // In a chat interface, the user has already interacted, so this shouldn't happen often
-      console.warn('[ElevenLabs] Autoplay blocked. Audio ready but needs user interaction.');
+    console.log(`[ElevenLabs] Added to queue (${audioQueue.length} items)`);
 
-      // Store the audio element for potential manual playback
-      // You could emit an event here or return the audio element
-      // For now, we'll try to play on next user interaction
-      const playOnClick = () => {
-        audio.play().catch(console.error);
-        document.removeEventListener('click', playOnClick);
-      };
-      document.addEventListener('click', playOnClick, { once: true });
-    }
+    // Start processing queue
+    processQueue();
   } catch (error) {
-    // If ElevenLabs is not configured or fails, fail silently
-    // The app should continue to work without voice
-    console.error('[ElevenLabs] Failed to speak text:', error);
+    console.error('[ElevenLabs] Failed to queue speech:', error);
   }
 }
 
