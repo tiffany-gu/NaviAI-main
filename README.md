@@ -8,6 +8,7 @@ An AI-powered conversational journey planning assistant that helps you plan road
 
 - **Conversational Trip Planning** - Plan trips using natural language like "to Boston with coffee shops along the way"
 - **Voice Input** - Speak your requests with automatic silence detection and optional wake word ("Hey Journey")
+- **Voice Output** - AI responses spoken aloud using ElevenLabs text-to-speech (optional)
 - **Intelligent Stop Recommendations** - Get AI-curated stops for gas, food, coffee, scenic viewpoints, and more
 - **Interactive Maps** - Real-time Google Maps visualization with turn-by-turn directions
 - **Time-Aware Planning** - Plan routes with arrival deadlines and optimal stop durations
@@ -87,6 +88,10 @@ AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
 AZURE_OPENAI_API_VERSION=2024-12-01-preview
 AZURE_OPENAI_DEPLOYMENT=your-deployment-name
 
+# ElevenLabs Text-to-Speech (optional - for voice output)
+VITE_ELEVENLABS_API_KEY=your-elevenlabs-api-key-here
+VITE_VOICE_ID=EXAVITQu4vr4xnSDxMaL  # Optional: voice ID (defaults to Sarah)
+
 # Database (optional - defaults to in-memory storage)
 DATABASE_URL=postgresql://user:password@host:port/database
 
@@ -122,7 +127,23 @@ NODE_ENV=development
 3. Configure environment variables as shown above
 4. See `AZURE_OPENAI_SETUP.md` for detailed instructions
 
-### 6. Start Development Server
+### 6. Set Up ElevenLabs Text-to-Speech (Optional)
+
+**Enable voice output for AI responses:**
+
+1. Go to [ElevenLabs](https://elevenlabs.io/)
+2. Sign up for an account (free tier available)
+3. Get your API key from the [profile page](https://elevenlabs.io/app/settings/api-keys)
+4. (Optional) Choose a voice from the [Voice Library](https://elevenlabs.io/voice-library)
+5. Add to `.env.local`:
+   ```bash
+   VITE_ELEVENLABS_API_KEY=your-elevenlabs-api-key-here
+   VITE_VOICE_ID=EXAVITQu4vr4xnSDxMaL  # Optional: defaults to Sarah
+   ```
+
+**Note:** If ElevenLabs is not configured, the app will work normally without voice output.
+
+### 7. Start Development Server
 
 ```bash
 npm run dev
@@ -409,10 +430,18 @@ const WAKE_WORD = 'hey journey';  // Activation phrase
 2. App will fall back to in-memory storage if DB unavailable
 3. Check database credentials and network access
 
+### Voice Output Not Working
+1. Verify `VITE_ELEVENLABS_API_KEY` is set in `.env.local`
+2. Check browser console for `[ElevenLabs]` error messages
+3. Ensure you haven't exceeded your ElevenLabs quota
+4. Check browser audio is not muted
+5. See `ELEVENLABS_VOICE_SETUP.md` for detailed troubleshooting
+
 ## Documentation
 
 - `VOICE_FEATURES.md` - Detailed voice feature documentation
 - `VOICE_INTEGRATION_SUMMARY.md` - Technical voice integration details
+- `ELEVENLABS_VOICE_SETUP.md` - ElevenLabs text-to-speech setup guide
 - `AZURE_OPENAI_SETUP.md` - Azure OpenAI setup guide
 - `FEATURE_CURRENT_LOCATION.md` - Current location feature guide
 - `IMPLEMENTATION_SUMMARY.md` - Development summary
