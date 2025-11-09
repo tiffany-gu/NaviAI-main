@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Test - Hey Journey</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        button {
+            padding: 15px 30px;
+            font-size: 16px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin: 10px 5px;
+        }
+        .start-btn {
+            background: #4CAF50;
+            color: white;
+        }
+        .stop-btn {
+            background: #f44336;
+            color: white;
+        }
+        .status {
+            margin: 20px 0;
+            padding: 15px;
+            border-radius: 5px;
+            background: #e3f2fd;
+        }
+        .listening {
+            background: #fff3cd;
+        }
+        .recording {
+            background: #ffebee;
+        }
+        .log {
+            margin-top: 20px;
+            padding: 10px;
+            background: #f5f5f5;
+            border-radius: 5px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .log-entry {
+            margin: 5px 0;
+            padding: 5px;
+            border-left: 3px solid #2196F3;
+            background: white;
+        }
+        .error {
+            border-left-color: #f44336;
+            background: #ffebee;
+        }
+        .success {
+            border-left-color: #4CAF50;
+            background: #e8f5e9;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 Voice Input Test - "Hey Journey"</h1>
+        <p>This test page verifies the wake word detection implementation.</p>
+
+        <div class="status" id="status">
+            <strong>Status:</strong> <span id="statusText">Ready</span>
+        </div>
+
+        <div>
+            <button class="start-btn" id="startBtn" onclick="startListening()">Start Listening for "Hey Journey"</button>
+            <button class="stop-btn" id="stopBtn" onclick="stopListening()" disabled>Stop Listening</button>
+        </div>
+
+        <div class="log" id="log"></div>
+    </div>
+
+    <script>
+        let wakeWordRecognition = null;
+        let recordingRecognition = null;
+        let isListening = false;
+        let isRecording = false;
+        const WAKE_WORD = 'hey journey';
+
+        function log(message, type = 'info') {
+            const logDiv = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            const timestamp = new Date().toLocaleTimeString();
+            entry.textContent = `[${timestamp}] ${message}`;
+            logDiv.insertBefore(entry, logDiv.firstChild);
+        }
+
+        function updateStatus(text, className = '') {
+            const statusDiv = document.getElementById('status');
+            const statusText = document.getElementById('statusText');
+            statusText.textContent = text;
+            statusDiv.className = `status ${className}`;
+        }
+
+        function checkBrowserCompatibility() {
+            if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+                log('Speech recognition not supported in this browser!', 'error');
+                alert('Speech recognition not supported. Please use Chrome or Edge.');
+                return false;
+            }
+            log('Browser supports Speech Recognition API', 'success');
+            return true;
+        }
+
+        async function requestMicPermission() {
+            try {
+                log('Requesting microphone permission...');
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                stream.getTracks().forEach(track => track.stop());
+                log('Microphone permission granted', 'success');
+                return true;
+            } catch (error) {
+                log(`Microphone permission denied: ${error.message}`, 'error');
+                alert('Please allow microphone access to use voice features.');
+                return false;
+            }
+        }
+
+        function startWakeWordDetection() {
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            wakeWordRecognition = new SpeechRecognition();
+            wakeWordRecognition.continuous = true;
+            wakeWordRecognition.interimResults = true;
+            wakeWordRecognition.lang = 'en-US';
+
+            wakeWordRecognition.onresult = (event) => {
+                const transcript = Array.from(event.results)
+                    .map(result => result[0].transcript)
+                    .join('')
+                    .toLowerCase()
+                    .trim();
+
+                log(`Wake Word Detection heard: "${transcript}"`);
+
+                if (isListening && transcript.includes(WAKE_WORD)) {
+                    log('🎉 WAKE WORD DETECTED!', 'success');
+                    wakeWordRecognition.stop();
+                    startRecording();
+                }
+            };
+
+            wakeWordRecognition.onerror = (event) => {
+                log(`Wake Word Error: ${event.error}`, 'error');
+                if (event.error === 'no-speech' && isListening) {
+                    setTimeout(() => {
+                        if (isListening) {
+                            try {
+                                wakeWordRecognition.start();
+                                log('Restarting wake word detection after no-speech...');
+                            } catch (e) {
+                                log(`Failed to restart: ${e.message}`, 'error');
+                            }
+                        }
+                    }, 100);
+                }
+            };
+
+            wakeWordRecognition.onend = () => {
+                log('Wake word detection ended');
+                if (isListening && !isRecording) {
+                    try {
+                        wakeWordRecognition.start();
+                        log('Restarting wake word detection...');
+                    } catch (e) {
+                        log(`Failed to restart on end: ${e.message}`, 'error');
+                    }
+                }
+            };
+
+            try {
+                wakeWordRecognition.start();
+                log('✅ Wake word detection started - Say "Hey Journey"!', 'success');
+                updateStatus('Listening for "Hey Journey"...', 'listening');
+            } catch (e) {
+                log(`Failed to start wake word detection: ${e.message}`, 'error');
+            }
+        }
+
+        function startRecording() {
+            isRecording = true;
+            updateStatus('Recording... Speak now!', 'recording');
+            log('🎙️ Recording started - listening for your command');
+
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            recordingRecognition = new SpeechRecognition();
+            recordingRecognition.continuous = false;
+            recordingRecognition.interimResults = false;
+            recordingRecognition.lang = 'en-US';
+
+            recordingRecognition.onresult = (event) => {
+                const transcript = event.results[0][0].transcript;
+                log(`✅ Transcript: "${transcript}"`, 'success');
+                alert(`You said: "${transcript}"`);
+                stopRecording();
+
+                // Restart wake word detection
+                if (isListening) {
+                    setTimeout(() => startWakeWordDetection(), 1000);
+                }
+            };
+
+            recordingRecognition.onerror = (error) => {
+                log(`Recording error: ${error.error}`, 'error');
+                stopRecording();
+            };
+
+            recordingRecognition.onend = () => {
+                log('Recording ended');
+                isRecording = false;
+            };
+
+            try {
+                recordingRecognition.start();
+            } catch (e) {
+                log(`Failed to start recording: ${e.message}`, 'error');
+                isRecording = false;
+            }
+        }
+
+        function stopRecording() {
+            if (recordingRecognition) {
+                try {
+                    recordingRecognition.stop();
+                } catch (e) {
+                    log(`Error stopping recording: ${e.message}`, 'error');
+                }
+                recordingRecognition = null;
+            }
+            isRecording = false;
+            if (isListening) {
+                updateStatus('Listening for "Hey Journey"...', 'listening');
+            }
+        }
+
+        async function startListening() {
+            if (!checkBrowserCompatibility()) return;
+
+            const hasPermission = await requestMicPermission();
+            if (!hasPermission) return;
+
+            isListening = true;
+            document.getElementById('startBtn').disabled = true;
+            document.getElementById('stopBtn').disabled = false;
+
+            log('=== Starting wake word detection ===', 'success');
+            startWakeWordDetection();
+        }
+
+        function stopListening() {
+            isListening = false;
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+
+            if (wakeWordRecognition) {
+                try {
+                    wakeWordRecognition.stop();
+                    log('Wake word detection stopped');
+                } catch (e) {
+                    log(`Error stopping wake word detection: ${e.message}`, 'error');
+                }
+                wakeWordRecognition = null;
+            }
+
+            stopRecording();
+            updateStatus('Stopped', '');
+            log('=== Listening stopped ===', 'error');
+        }
+
+        // Initial setup
+        log('Voice test page loaded - Click "Start Listening" to begin', 'success');
+    </script>
+</body>
+</html>

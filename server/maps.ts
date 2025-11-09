@@ -415,7 +415,7 @@ export async function getPlaceDetails(placeId: string): Promise<PlaceDetailsResu
   try {
     const url = new URL('https://maps.googleapis.com/maps/api/place/details/json');
     url.searchParams.append('place_id', placeId);
-    url.searchParams.append('fields', 'place_id,name,formatted_address,rating,user_ratings_total,opening_hours,reviews,photos,types,price_level,website,formatted_phone_number');
+    url.searchParams.append('fields', 'place_id,name,geometry,formatted_address,vicinity,opening_hours,rating,price_level,user_ratings_total,website,photos,types');
     url.searchParams.append('key', apiKey);
 
     console.log('[getPlaceDetails] Fetching details for place:', placeId);
@@ -544,85 +544,172 @@ export async function verifyRestaurantAttributes(
     return { matchesRequirements: false, verifiedAttributes: [], confidenceScore: 0 };
   }
 
-  // Check cuisine type
-  if (requirements?.cuisine) {
-    const types = (details.types || []).map((t: string) => t.toLowerCase());
-    const cuisineMatch = types.some(type => type.includes(requirements.cuisine!.toLowerCase()));
-    if (cuisineMatch) {
-      verifiedAttributes.push(`${requirements.cuisine} cuisine`);
-      confidenceScore += 20;
-    } else {
-      matchesRequirements = false;
-    }
-  }
+  const detailsTypes = (details.types || []).map((t: string) => t.toLowerCase());
+  const placeTypes = Array.isArray(place.types)
+    ? place.types.map((t: string) => t.toLowerCase())
+    : [];
+  const reviews = Array.isArray(details.reviews) ? details.reviews : [];
+  const reviewTexts = reviews
+    .map((r: any) => (r.text || '').toLowerCase())
+    .join(' ');
+  const positiveReviews = reviews.filter((r: any) => r.rating >= 4).length;
+  const totalReviews = reviews.length;
+  const positiveRatio = totalReviews > 0 ? positiveReviews / totalReviews : 0;
 
-  // Analyze reviews for requirements
-  if (details.reviews && details.reviews.length > 0) {
-    const reviewTexts = details.reviews.map((r: any) => r.text.toLowerCase()).join(' ');
-    const positiveReviews = details.reviews.filter((r: any) => r.rating >= 4).length;
-    const totalReviews = details.reviews.length;
-    const positiveRatio = positiveReviews / totalReviews;
-
-    // Verify vegetarian options
-    if (requirements?.vegetarian) {
-      const vegetarianIndicators = [
-        'vegetarian', 'vegan', 'plant-based', 'meatless', 'vegetable options',
-        'salad', 'tofu', 'veggie', 'plant-based menu'
-      ];
-      const hasVegetarian = vegetarianIndicators.some(indicator => reviewTexts.includes(indicator));
-      
-      if (hasVegetarian) {
-        verifiedAttributes.push('vegetarian options (verified in reviews)');
-        confidenceScore += 30;
-      } else {
-        matchesRequirements = false;
-      }
-    }
-
-    // Verify kid-friendly
-    if (requirements?.kidFriendly) {
-      const kidFriendlyIndicators = [
-        'kid-friendly', 'children', 'family', 'high chair', 'kids menu',
-        'child-friendly', 'family-friendly', 'play area', 'kids play'
-      ];
-      const hasKidFriendly = kidFriendlyIndicators.some(indicator => reviewTexts.includes(indicator));
-      
-      if (hasKidFriendly) {
-        verifiedAttributes.push('kid-friendly (verified in reviews)');
-        confidenceScore += 25;
-      } else {
-        matchesRequirements = false;
-      }
-    }
-
-    // Verify parking
-    if (requirements?.parking) {
-      const parkingIndicators = [
-        'parking', 'parking lot', 'ample parking', 'easy parking',
-        'parking available', 'plenty of parking', 'free parking'
-      ];
-      const parkingNegative = ['no parking', 'parking difficult', 'limited parking'];
-      
-      const hasParking = parkingIndicators.some(indicator => reviewTexts.includes(indicator));
-      const hasParkingIssues = parkingNegative.some(indicator => reviewTexts.includes(indicator));
-      
-      if (hasParking && !hasParkingIssues) {
-        verifiedAttributes.push('parking available (verified in reviews)');
-        confidenceScore += 15;
-      } else if (hasParkingIssues) {
-        matchesRequirements = false;
-      }
-    }
-
-    // Add rating-based confidence
-    if (details.rating && details.rating >= 4.5) {
+  if (typeof details.rating === 'number') {
+    confidenceScore += Math.round(details.rating * 5); // 4.2★ -> +21
+    if (details.rating >= 4.5) {
       verifiedAttributes.push(`highly rated (${details.rating}/5)`);
       confidenceScore += 10;
     }
   }
 
-  // Check price level
-  if (details.price_level) {
+  if (typeof details.user_ratings_total === 'number') {
+    if (details.user_ratings_total >= 1000) {
+      confidenceScore += 10;
+    } else if (details.user_ratings_total >= 500) {
+      confidenceScore += 8;
+    } else if (details.user_ratings_total >= 200) {
+      confidenceScore += 6;
+    } else if (details.user_ratings_total >= 50) {
+      confidenceScore += 4;
+    } else if (details.user_ratings_total >= 10) {
+      confidenceScore += 2;
+    }
+  }
+
+  if (totalReviews > 0) {
+    if (positiveRatio >= 0.85) {
+      confidenceScore += 8;
+    } else if (positiveRatio >= 0.7) {
+      confidenceScore += 4;
+    }
+  }
+
+  if (requirements?.cuisine) {
+    const normalizedCuisine = requirements.cuisine.trim().toLowerCase();
+    const cuisineVariants = new Set<string>([
+      normalizedCuisine,
+      normalizedCuisine.replace(/\s+/g, '_'),
+      normalizedCuisine.replace(/\s+/g, ' '),
+      `${normalizedCuisine}_restaurant`,
+      `${normalizedCuisine} restaurant`,
+    ]);
+
+    const candidateStrings = [
+      ...detailsTypes,
+      ...placeTypes,
+      (details.name || '').toLowerCase(),
+      (place.name || '').toLowerCase(),
+      reviewTexts,
+    ];
+
+    const variantList = Array.from(cuisineVariants);
+    const cuisineMatch = candidateStrings.some(entry =>
+      variantList.some(variant => {
+        const normalizedVariant = variant.toLowerCase();
+        const variantWithSpaces = normalizedVariant.replace(/_/g, ' ');
+        const variantWithUnderscores = normalizedVariant.replace(/\s+/g, '_');
+        const normalizedEntry = entry.toLowerCase();
+        return (
+          normalizedEntry.includes(normalizedVariant) ||
+          normalizedEntry.includes(variantWithSpaces) ||
+          normalizedEntry.includes(variantWithUnderscores)
+        );
+      })
+    );
+
+    if (cuisineMatch) {
+      const formattedCuisine =
+        requirements.cuisine.charAt(0).toUpperCase() +
+        requirements.cuisine.slice(1);
+      verifiedAttributes.push(`${formattedCuisine} cuisine`);
+      confidenceScore += 15;
+    } else {
+      matchesRequirements = false;
+    }
+  }
+
+  if (requirements?.vegetarian) {
+    const vegetarianIndicators = [
+      'vegetarian',
+      'vegan',
+      'plant-based',
+      'meatless',
+      'vegetable options',
+      'salad',
+      'tofu',
+      'veggie',
+      'plant-based menu',
+    ];
+    const hasVegetarian = vegetarianIndicators.some(indicator =>
+      reviewTexts.includes(indicator)
+    );
+
+    if (hasVegetarian) {
+      verifiedAttributes.push('vegetarian options (verified in reviews)');
+      confidenceScore += 30;
+    } else if (totalReviews > 0) {
+      matchesRequirements = false;
+    }
+  }
+
+  if (requirements?.kidFriendly) {
+    const kidFriendlyIndicators = [
+      'kid-friendly',
+      'children',
+      'family',
+      'high chair',
+      'kids menu',
+      'child-friendly',
+      'family-friendly',
+      'play area',
+      'kids play',
+    ];
+    const hasKidFriendly = kidFriendlyIndicators.some(indicator =>
+      reviewTexts.includes(indicator)
+    );
+
+    if (hasKidFriendly) {
+      verifiedAttributes.push('kid-friendly (verified in reviews)');
+      confidenceScore += 25;
+    } else if (totalReviews > 0) {
+      matchesRequirements = false;
+    }
+  }
+
+  if (requirements?.parking) {
+    const parkingIndicators = [
+      'parking',
+      'parking lot',
+      'ample parking',
+      'easy parking',
+      'parking available',
+      'plenty of parking',
+      'free parking',
+    ];
+    const parkingNegative = [
+      'no parking',
+      'parking difficult',
+      'limited parking',
+    ];
+
+    const hasParking = parkingIndicators.some(indicator =>
+      reviewTexts.includes(indicator)
+    );
+    const hasParkingIssues = parkingNegative.some(indicator =>
+      reviewTexts.includes(indicator)
+    );
+
+    if (hasParking && !hasParkingIssues) {
+      verifiedAttributes.push('parking available (verified in reviews)');
+      confidenceScore += 15;
+    } else if (hasParkingIssues) {
+      matchesRequirements = false;
+    }
+  }
+
+  if (typeof details.price_level === 'number' && details.price_level > 0) {
     verifiedAttributes.push(`${'$'.repeat(details.price_level)} price range`);
   }
 
@@ -631,7 +718,7 @@ export async function verifyRestaurantAttributes(
 
 export async function findPlacesAlongRoute(
   polyline: string,
-  type: 'gas_station' | 'restaurant' | 'tourist_attraction',
+  type: 'gas_station' | 'restaurant' | 'tourist_attraction' | 'cafe' | 'meal_takeaway' | 'bakery',
   filters?: {
     rating?: number;
     priceLevel?: string;
@@ -664,15 +751,22 @@ export async function findPlacesAlongRoute(
 
   let filteredPlaces = allPlaces;
   
-  if (filters?.rating) {
-    filteredPlaces = filteredPlaces.filter(p => p.rating && p.rating >= filters.rating!);
+  if (type === 'restaurant') {
+    // Enforce stronger filters for restaurants
+    const minRating = Math.max(filters?.rating ?? 0, 4.3);
+    filteredPlaces = filteredPlaces.filter(p => (p.rating ?? 0) >= minRating && (p.user_ratings_total ?? 0) >= 50);
+  } else if (filters?.rating) {
+    filteredPlaces = filteredPlaces.filter(p => (p.rating ?? 0) >= filters.rating!);
   }
 
   const uniquePlaces = Array.from(
     new Map(filteredPlaces.map(p => [p.place_id, p])).values()
   );
 
-  return uniquePlaces.sort((a, b) => (b.rating || 0) - (a.rating || 0)).slice(0, 10);
+  // Cap results to reduce API spam downstream and keep UI snappy
+  return uniquePlaces
+    .sort((a, b) => (b.rating || 0) - (a.rating || 0))
+    .slice(0, 10);
 }
 
 function decodePolyline(encoded: string): Array<{ lat: number; lng: number }> {

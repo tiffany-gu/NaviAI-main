@@ -9,6 +9,7 @@ import StopCard from "@/components/StopCard";
 import MapView from "@/components/MapView";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { useToast } from "@/hooks/use-toast";
+import { useMicrophone } from "@/hooks/useMicrophone";
 
 interface Message {
   id: string;
@@ -31,13 +32,12 @@ interface Stop {
 }
 
 export default function JourneyAssistant() {
-  const [isRecording, setIsRecording] = useState(false);
   const [isNavigating, setIsNavigating] = useState(false);
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "1",
-      text: "Hi! I'm your Journey Assistant. Tell me where you're headed and I'll help you plan the perfect route with gas stops, restaurants, and scenic viewpoints along the way.",
+      text: "Hi! I'm your Journey Assistant. Tell me where you're headed and I'll help you plan the perfect route with gas stops, restaurants, and scenic viewpoints along the way. You can say something like 'to Boston' and I'll use your current location as the starting point!",
       isUser: false,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     },
@@ -46,8 +46,26 @@ export default function JourneyAssistant() {
   const [routeData, setRouteData] = useState<any>(null);
   const [stops, setStops] = useState<Stop[]>([]);
   const [addedStops, setAddedStops] = useState<Array<{ type: string; name: string; location: { lat: number; lng: number }; category?: string }>>([]);
+  const [userRequestedStops, setUserRequestedStops] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
+
+  // Enhanced voice input with wake word detection and silence monitoring
+  const {
+    isListening,
+    isRecording,
+    transcription,
+    error: micError,
+    toggleListening,
+    clearTranscription,
+  } = useMicrophone({
+    enableWakeWord: true, // Set to true to enable "Hey Journey" wake word
+    onTranscript: (text) => {
+      console.log('[JourneyAssistant] Voice transcript received:', text);
+      handleSendMessage(text);
+      clearTranscription();
+    },
+  });
 
   // Get user location on app load
   useEffect(() => {
@@ -90,16 +108,21 @@ export default function JourneyAssistant() {
       const fromPattern = /from\s+[a-zA-Z\s,]+\s+to\s+[a-zA-Z\s,]+/i;
       const myLocationPattern = /(my\s+(current\s+)?location|current\s+location|from\s+here|start\s+here|starting\s+from\s+here)/i;
 
-      // Use stored userLocation if available and user is asking for "to X" without "from"
-      let locationToSend = null;
+      // Determine if we should use current location as the starting point
+      // Use current location when:
+      // 1. User explicitly mentions "my location", "current location", etc.
+      // 2. User asks for route "to X" without specifying "from"
+      // 3. No "from" pattern is detected at all
       const shouldUseCurrentLocation =
         (toPattern.test(message) && !fromPattern.test(message)) ||
-        myLocationPattern.test(message);
+        myLocationPattern.test(message) ||
+        !fromPattern.test(message); // Always try to use current location if no "from" is specified
 
+      let locationToSend = null;
       if (shouldUseCurrentLocation) {
         if (userLocation) {
           locationToSend = userLocation;
-          console.log('[chatMutation] Using stored user location:', locationToSend);
+          console.log('[chatMutation] Using stored user location as starting point:', locationToSend);
         } else if ('geolocation' in navigator) {
           // Fallback: try to get location if not already stored
           try {
@@ -115,9 +138,17 @@ export default function JourneyAssistant() {
               lng: position.coords.longitude
             };
             setUserLocation(locationToSend); // Store for future use
-            console.log('[chatMutation] Got fresh user location:', locationToSend);
+            console.log('[chatMutation] Got fresh user location as starting point:', locationToSend);
           } catch (error) {
             console.error('[chatMutation] Could not get user location:', error);
+            // If we can't get location and user didn't specify "from", show a helpful message
+            if (!fromPattern.test(message)) {
+              toast({
+                title: "Location Access Needed",
+                description: "Please allow location access or specify a starting location (e.g., 'from Atlanta to...')",
+                variant: "destructive",
+              });
+            }
           }
         }
       }
@@ -127,7 +158,7 @@ export default function JourneyAssistant() {
     },
     onSuccess: (data: any) => {
       const aiMessage: Message = {
-        id: Date.now().toString(),
+        id: crypto.randomUUID(),
         text: data.response,
         isUser: false,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -135,7 +166,20 @@ export default function JourneyAssistant() {
       setMessages((prev) => [...prev, aiMessage]);
 
       if (data.tripRequestId) {
+        // If this is a new trip, reset the stops requested flag
+        if (data.tripRequestId !== tripRequestId) {
+          setUserRequestedStops(false);
+        }
         setTripRequestId(data.tripRequestId);
+      }
+
+      // Track if user requested stops
+      if (data.requestedStops) {
+        setUserRequestedStops(true);
+        // If route already exists and user is now asking for stops, find them
+        if (routeData && data.tripRequestId) {
+          findStopsMutation.mutate(data.tripRequestId);
+        }
       }
 
       if (!data.hasMissingInfo && data.tripRequestId) {
@@ -157,17 +201,28 @@ export default function JourneyAssistant() {
       return await res.json();
     },
     onSuccess: (data: any, variables: string) => {
+      console.log('[planRouteMutation] Route data received, legs:', data.selectedRoute?.legs?.length || 0);
       setRouteData(data.selectedRoute);
-      
-      const routeMessage: Message = {
-        id: Date.now().toString(),
-        text: "I've found your route! Let me find some great stops along the way...",
-        isUser: false,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      };
-      setMessages((prev) => [...prev, routeMessage]);
 
-      findStopsMutation.mutate(variables);
+      // Only find stops if user explicitly requested them
+      if (userRequestedStops) {
+        const routeMessage: Message = {
+          id: crypto.randomUUID(),
+          text: "I've found your route! Let me find some great stops along the way...",
+          isUser: false,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        };
+        setMessages((prev) => [...prev, routeMessage]);
+        findStopsMutation.mutate(variables);
+      } else {
+        const routeMessage: Message = {
+          id: crypto.randomUUID(),
+          text: "I've found your route! If you'd like me to find stops along the way, just ask (e.g., 'find a restaurant' or 'find a gas station').",
+          isUser: false,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        };
+        setMessages((prev) => [...prev, routeMessage]);
+      }
     },
     onError: (error: Error) => {
       toast({
@@ -190,26 +245,30 @@ export default function JourneyAssistant() {
       // When stops are found, they're automatically added to the route by the backend
       // So we should track which stops were automatically added
       if (data.route) {
-        console.log('[JourneyAssistant] Updating route with waypoints from find-stops:', data.route);
+        console.log('[JourneyAssistant] Updating route with waypoints from find-stops');
+        console.log('[JourneyAssistant] Route legs:', data.route.legs?.length || 0);
+        data.route.legs?.forEach((leg: any, i: number) => {
+          console.log(`[JourneyAssistant] Leg ${i + 1}: ${leg.start_address} → ${leg.end_address}`);
+        });
         setRouteData(data.route);
         
         // If the backend automatically recalculated the route with stops,
         // we should mark those stops as "added" so they show as waypoints
         // However, for now, we'll let users manually add stops via the UI
         // The route already includes them as waypoints in the backend response
-        
+
         const routeMessage: Message = {
-          id: Date.now().toString(),
+          id: crypto.randomUUID(),
           text: `Route recalculated to include ${data.stops?.length || 0} stop${data.stops?.length !== 1 ? 's' : ''}. The directions now go through each stop in order.`,
           isUser: false,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
         setMessages((prev) => [...prev, routeMessage]);
       }
-      
+
       if (data.stops && data.stops.length > 0) {
         const stopsMessage: Message = {
-          id: Date.now().toString(),
+          id: crypto.randomUUID(),
           text: `Found ${data.stops.length} recommended stop${data.stops.length > 1 ? 's' : ''} along your route! Click "Add to Route" to include them in your directions.`,
           isUser: false,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -217,7 +276,7 @@ export default function JourneyAssistant() {
         setMessages((prev) => [...prev, stopsMessage]);
       } else {
         const noStopsMessage: Message = {
-          id: Date.now().toString(),
+          id: crypto.randomUUID(),
           text: "I couldn't find any stops along this route. Try adding preferences like restaurant types or scenic views to get better recommendations.",
           isUser: false,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -236,7 +295,7 @@ export default function JourneyAssistant() {
 
   const handleSendMessage = (text: string) => {
     const userMessage: Message = {
-      id: Date.now().toString(),
+      id: crypto.randomUUID(),
       text,
       isUser: true,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -245,49 +304,20 @@ export default function JourneyAssistant() {
     chatMutation.mutate(text);
   };
 
-  const handleVoiceClick = () => {
-    if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
-      toast({
-        title: "Voice Input Not Supported",
-        description: "Your browser doesn't support voice input. Please type your request.",
-        variant: "destructive",
-      });
-      return;
-    }
+  const handleVoiceClick = async () => {
+    await toggleListening();
+  };
 
-    if (isRecording) {
-      setIsRecording(false);
-      return;
-    }
-
-    setIsRecording(true);
-
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    const recognition = new SpeechRecognition();
-    recognition.lang = 'en-US';
-    recognition.continuous = false;
-
-    recognition.onresult = (event: any) => {
-      const transcript = event.results[0][0].transcript;
-      setIsRecording(false);
-      handleSendMessage(transcript);
-    };
-
-    recognition.onerror = () => {
-      setIsRecording(false);
+  // Show error toast when microphone error occurs
+  useEffect(() => {
+    if (micError) {
       toast({
         title: "Voice Input Error",
-        description: "Couldn't process voice input. Please try again.",
+        description: micError,
         variant: "destructive",
       });
-    };
-
-    recognition.onend = () => {
-      setIsRecording(false);
-    };
-
-    recognition.start();
-  };
+    }
+  }, [micError, toast]);
 
   const calculateRouteComparison = () => {
     if (!routeData || !routeData.legs) return null;
@@ -371,6 +401,49 @@ export default function JourneyAssistant() {
     }
   };
 
+  const handleSkipStop = (stop: { type: string; name: string; location?: { lat: number; lng: number } }) => {
+    console.log('[handleSkipStop] Skipping stop:', stop);
+
+    // Check if this stop was already added to the route
+    const isInRoute = addedStops.some(s => s.name === stop.name);
+
+    if (isInRoute) {
+      // Remove from addedStops and recalculate route
+      const updatedAddedStops = addedStops.filter(s => s.name !== stop.name);
+      setAddedStops(updatedAddedStops);
+
+      toast({
+        title: "Stop Removed",
+        description: `${stop.name} has been removed from your route. Recalculating directions...`,
+      });
+
+      // Recalculate route without this stop
+      if (tripRequestId) {
+        if (updatedAddedStops.length > 0) {
+          // Still have stops, recalculate with remaining stops
+          recalculateRouteMutation.mutate({
+            tripRequestId,
+            waypoints: updatedAddedStops.map(s => ({
+              name: s.name,
+              location: s.location,
+            })),
+          });
+        } else {
+          // No more stops, re-plan the basic route
+          planRouteMutation.mutate(tripRequestId);
+        }
+      }
+    } else {
+      // Just remove from available stops list
+      setStops(prev => prev.filter(s => s.name !== stop.name));
+      
+      toast({
+        title: "Stop Skipped",
+        description: `${stop.name} has been removed from suggestions.`,
+      });
+    }
+  };
+
   const recalculateRouteMutation = useMutation({
     mutationFn: async ({ tripRequestId, waypoints }: { tripRequestId: string; waypoints: Array<{ name: string; location: { lat: number; lng: number } }> }) => {
       console.log('[recalculateRoute] Making request with:', { tripRequestId, waypoints });
@@ -396,11 +469,31 @@ export default function JourneyAssistant() {
       }
     },
     onSuccess: (data: any, variables: { tripRequestId: string; waypoints: Array<{ name: string; location: { lat: number; lng: number } }> }) => {
-      console.log('[recalculateRoute] Route updated with waypoints:', data.route);
+      console.log('[recalculateRoute] Route updated with waypoints');
+      console.log('[recalculateRoute] Route legs:', data.route?.legs?.length || 0);
+      console.log('[recalculateRoute] Optimized waypoint_order:', data.route?.waypoint_order);
+      data.route?.legs?.forEach((leg: any, i: number) => {
+        console.log(`[recalculateRoute] Leg ${i + 1}: ${leg.start_address} → ${leg.end_address}`);
+      });
       setRouteData(data.route);
       
-      // Use the waypoints from the mutation variables to get accurate count
-      const stopCount = variables.waypoints.length;
+      // Update addedStops with optimized order from backend
+      if (data.waypoints && data.waypoints.length > 0) {
+        const reorderedStops = data.waypoints.map((wp: any) => {
+          const existingStop = addedStops.find(s => s.name === wp.name);
+          return existingStop || {
+            type: 'waypoint',
+            name: wp.name,
+            location: wp.location,
+            category: 'stop',
+          };
+        });
+        setAddedStops(reorderedStops);
+        console.log('[recalculateRoute] Stops reordered per Google optimization');
+      }
+      
+      // Use the waypoints from response (already reordered)
+      const stopCount = data.waypoints?.length || variables.waypoints.length;
       
       // Calculate updated travel time
       const totalDuration = data.route?.legs?.reduce((sum: number, leg: any) => sum + (leg.duration?.value || 0), 0) || 0;
@@ -421,10 +514,10 @@ export default function JourneyAssistant() {
         title: "Route Updated",
         description: `Route recalculated! ${distanceMiles} miles, ${durationWithStopsText} total (${stopCount} stop${stopCount !== 1 ? 's' : ''})`,
       });
-      
+
       // Add message to chat about the route update
       const routeUpdateMessage: Message = {
-        id: Date.now().toString(),
+        id: crypto.randomUUID(),
         text: `Route updated! Your journey now includes ${stopCount} stop${stopCount !== 1 ? 's' : ''}. Estimated travel time: ${durationWithStopsText} (including ${stopCount * 10} minutes for stops), Total distance: ${distanceMiles} miles.`,
         isUser: false,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -445,7 +538,7 @@ export default function JourneyAssistant() {
 
   return (
     <div className="flex flex-col h-screen bg-background">
-      <AppHeader isRecording={isRecording} />
+      <AppHeader isListening={isListening} isRecording={isRecording} />
 
       <div className="flex-1 flex overflow-hidden">
         <div className="w-[40%] border-r border-border flex flex-col">
@@ -468,18 +561,19 @@ export default function JourneyAssistant() {
                     distance={comparison.distance}
                     addedStops={addedStops}
                     onStartNavigation={handleStartNavigation}
+                    onRemoveStop={handleSkipStop}
                   />
                 </div>
               )}
               
               {stops.length > 0 && (
                 <div className="space-y-3" data-testid="container-stops">
-                  {stops.map((stop, index) => (
+                  {stops.map((stop) => (
                     <StopCard
-                      key={index}
+                      key={`${stop.name}-${stop.type}`}
                       {...stop}
                       onAddToRoute={handleAddStopToRoute}
-                      onSkip={() => setStops(prev => prev.filter((_, i) => i !== index))}
+                      onSkip={() => handleSkipStop(stop)}
                     />
                   ))}
                 </div>

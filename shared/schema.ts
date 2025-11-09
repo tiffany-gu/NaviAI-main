@@ -21,11 +21,30 @@ export const tripRequests = pgTable("trip_requests", {
       openNow?: boolean;
       vegetarian?: boolean;
       vegan?: boolean;
+      keywords?: string[];
     };
     requestedStops?: {
       gas?: boolean;
       restaurant?: boolean;
       scenic?: boolean;
+      coffee?: boolean;
+      tea?: boolean;
+      dessert?: boolean;
+      bubbleTea?: boolean;
+      grocery?: boolean;
+    };
+    customStops?: Array<{
+      id: string;
+      label?: string;
+      keywords: string[];
+      placeTypes: string[];
+      minRating?: number;
+      maxDetourMinutes?: number;
+    }>;
+    timeConstraints?: {
+      arrivalTime?: string; // e.g., "5:00 PM"
+      arrivalTimeHours?: number; // e.g., 2 (arrive in 2 hours)
+      departureTime?: string; // e.g., "2:00 PM"
     };
   }>(),
   route: jsonb("route").$type<any>(),

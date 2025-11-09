@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 interface MapViewProps {
   route?: any;
   stops?: Array<{
-    type: 'gas' | 'restaurant' | 'scenic';
+    type: 'gas' | 'restaurant' | 'scenic' | 'grocery' | 'coffee' | 'tea' | 'dessert' | 'bubbleTea';
     name: string;
     location?: any;
   }>;
@@ -22,10 +22,11 @@ interface MapViewProps {
 export default function MapView({ route, stops = [], addedStops = [], isNavigating = false, userLocation: initialUserLocation }: MapViewProps) {
   const mapContainerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.Map | null>(null);
+  const directionsRendererRef = useRef<google.maps.DirectionsRenderer | null>(null);
+  const routePolylineRef = useRef<google.maps.Polyline | null>(null);
   const markersRef = useRef<google.maps.Marker[]>([]);
   const waypointMarkersRef = useRef<google.maps.Marker[]>([]);
   const userLocationMarkerRef = useRef<google.maps.Marker | null>(null);
-  const routePolylineRef = useRef<google.maps.Polyline | null>(null);
   const [isNavigationView, setIsNavigationView] = useState(false);
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(initialUserLocation || null);
   const [currentStep, setCurrentStep] = useState<number>(0);
@@ -117,255 +118,230 @@ export default function MapView({ route, stops = [], addedStops = [], isNavigati
 
     return () => {
       // Cleanup
+      if (directionsRendererRef.current) {
+        directionsRendererRef.current.setMap(null);
+        directionsRendererRef.current = null;
+      }
       if (mapRef.current) {
         mapRef.current = null;
       }
     };
   }, [initialUserLocation]);
 
-  // Handle route rendering
+  // Handle route rendering using DirectionsService (fetches route from Google and renders with DirectionsRenderer)
   useEffect(() => {
     if (!mapRef.current || !route || !mapLoaded) return;
 
     const map = mapRef.current;
-    console.log('[MapView] Rendering route on Google Maps');
+    console.log('[MapView] Rendering route with DirectionsService + DirectionsRenderer');
 
-    // Clear existing route markers (start/end) but preserve waypoint markers and user location
-    const routeMarkers = markersRef.current.filter(marker => 
-      marker !== userLocationMarkerRef.current &&
-      !waypointMarkersRef.current.includes(marker)
-    );
-    routeMarkers.forEach(marker => marker.setMap(null));
-    markersRef.current = markersRef.current.filter(marker => 
-      marker === userLocationMarkerRef.current || waypointMarkersRef.current.includes(marker)
-    );
-
-    // Remove existing route polyline if it exists
+    // Clear existing DirectionsRenderer and polyline
+    if (directionsRendererRef.current) {
+      directionsRendererRef.current.setMap(null);
+      directionsRendererRef.current = null;
+    }
     if (routePolylineRef.current) {
       routePolylineRef.current.setMap(null);
+      routePolylineRef.current = null;
     }
 
-    // Decode and render polyline
-    if (route.overview_polyline?.points) {
-      const decodedPath = google.maps.geometry.encoding.decodePath(route.overview_polyline.points);
+    // Get origin, destination, and waypoints from route
+    const origin = route.legs?.[0]?.start_location;
+    const destination = route.legs?.[route.legs.length - 1]?.end_location;
+    
+    if (!origin || !destination) {
+      console.error('[MapView] Missing origin or destination in route');
+      return;
+    }
 
-      const routePolyline = new google.maps.Polyline({
-        path: decodedPath,
-        strokeColor: '#3B82F6',
-        strokeOpacity: 0.85,
-        strokeWeight: 6,
-        map: map,
-        zIndex: 5, // Lower than waypoint markers
-      });
-
-      routePolylineRef.current = routePolyline;
-
-      // Fit map to route bounds including waypoints (only when NOT navigating)
-      if (!isNavigating) {
-        const bounds = new google.maps.LatLngBounds();
-        decodedPath.forEach((point) => {
-          bounds.extend(point);
+    // Build waypoints array from addedStops
+    const waypoints: google.maps.DirectionsWaypoint[] = [];
+    if (addedStops && addedStops.length > 0) {
+      // Use optimized order from route if available
+      if (route.waypoint_order && route.waypoint_order.length > 0) {
+        route.waypoint_order.forEach((idx: number) => {
+          const stop = addedStops[idx];
+          if (stop && stop.location) {
+            waypoints.push({
+              location: new google.maps.LatLng(stop.location.lat, stop.location.lng),
+              stopover: true,
+            });
+          }
         });
-        
-        // Also include waypoints in bounds
-        if (addedStops && addedStops.length > 0) {
-          addedStops.forEach(stop => {
-            if (stop.location) {
-              bounds.extend({ lat: stop.location.lat, lng: stop.location.lng });
-            }
-          });
-        }
-        
-        map.fitBounds(bounds, { padding: 80 });
+      } else {
+        // Fallback to original order
+        addedStops.forEach((stop) => {
+          if (stop.location) {
+            waypoints.push({
+              location: new google.maps.LatLng(stop.location.lat, stop.location.lng),
+              stopover: true,
+            });
+          }
+        });
       }
     }
 
-    // Add start and end markers (only when NOT navigating and no waypoints)
-    // When waypoints exist, they serve as the route markers
-    if (route.legs && route.legs[0] && !isNavigating && (!addedStops || addedStops.length === 0)) {
-      const startLoc = route.legs[0].start_location;
+    // Create DirectionsService to fetch route from Google
+    const directionsService = new google.maps.DirectionsService();
+    const directionsRenderer = new google.maps.DirectionsRenderer({
+      map: map,
+      suppressMarkers: true, // We'll add custom numbered markers
+      preserveViewport: isNavigating,
+    });
 
-      // Start marker (green)
-      const startMarker = new google.maps.Marker({
-        position: { lat: startLoc.lat, lng: startLoc.lng },
-        map: map,
-        title: 'Start',
-        icon: {
-          path: google.maps.SymbolPath.CIRCLE,
-          scale: 10,
-          fillColor: '#10B981',
-          fillOpacity: 1,
-          strokeColor: 'white',
-          strokeWeight: 3,
-        },
-        label: {
-          text: 'S',
-          color: 'white',
-          fontWeight: 'bold',
-        },
-        zIndex: 5,
-      });
+    directionsRendererRef.current = directionsRenderer;
 
-      const startInfoWindow = new google.maps.InfoWindow({
-        content: `<div style="font-weight:600;">Start</div><div>${route.legs[0]?.start_address || ''}</div>`,
-      });
-      startMarker.addListener('click', () => startInfoWindow.open(map, startMarker));
+    // Request route from Google Maps DirectionsService
+    const request: google.maps.DirectionsRequest = {
+      origin: new google.maps.LatLng(origin.lat, origin.lng),
+      destination: new google.maps.LatLng(destination.lat, destination.lng),
+      waypoints: waypoints.length > 0 ? waypoints : undefined,
+      optimizeWaypoints: waypoints.length > 1, // Optimize if multiple waypoints
+      travelMode: google.maps.TravelMode.DRIVING,
+      avoidTolls: false,
+    };
 
-      markersRef.current.push(startMarker);
+    console.log('[MapView] Requesting route from DirectionsService with', waypoints.length, 'waypoints');
 
-      // End marker (red)
-      const endLoc = route.legs[route.legs.length - 1].end_location;
-      const endMarker = new google.maps.Marker({
-        position: { lat: endLoc.lat, lng: endLoc.lng },
-        map: map,
-        title: 'Destination',
-        icon: {
-          path: google.maps.SymbolPath.CIRCLE,
-          scale: 10,
-          fillColor: '#EF4444',
-          fillOpacity: 1,
-          strokeColor: 'white',
-          strokeWeight: 3,
-        },
-        label: {
-          text: 'D',
-          color: 'white',
-          fontWeight: 'bold',
-        },
-        zIndex: 5,
-      });
+    directionsService.route(request, (result, status) => {
+      if (status === google.maps.DirectionsStatus.OK && result) {
+        console.log('[MapView] Route received from DirectionsService, waypoint_order:', result.routes[0]?.waypoint_order);
+        directionsRenderer.setDirections(result);
+        
+        // Update route with optimized waypoint order if available
+        if (result.routes[0]?.waypoint_order && result.routes[0].waypoint_order.length > 0) {
+          console.log('[MapView] Optimized waypoint order:', result.routes[0].waypoint_order);
+        }
 
-      const endInfoWindow = new google.maps.InfoWindow({
-        content: `<div style="font-weight:600;">Destination</div><div>${route.legs[route.legs.length - 1]?.end_address || ''}</div>`,
-      });
-      endMarker.addListener('click', () => endInfoWindow.open(map, endMarker));
-
-      markersRef.current.push(endMarker);
-    } else if (route.legs && route.legs[0] && !isNavigating && addedStops && addedStops.length > 0) {
-      // When waypoints exist, still show start and destination markers
-      const startLoc = route.legs[0].start_location;
-      const endLoc = route.legs[route.legs.length - 1].end_location;
-
-      // Start marker (green) - smaller since waypoints are more prominent
-      const startMarker = new google.maps.Marker({
-        position: { lat: startLoc.lat, lng: startLoc.lng },
-        map: map,
-        title: 'Start',
-        icon: {
-          path: google.maps.SymbolPath.CIRCLE,
-          scale: 8,
-          fillColor: '#10B981',
-          fillOpacity: 0.9,
-          strokeColor: 'white',
-          strokeWeight: 2,
-        },
-        label: {
-          text: 'S',
-          color: 'white',
-          fontWeight: 'bold',
-        },
-        zIndex: 5,
-      });
-
-      const startInfoWindow = new google.maps.InfoWindow({
-        content: `<div style="font-weight:600;">Start</div><div>${route.legs[0]?.start_address || ''}</div>`,
-      });
-      startMarker.addListener('click', () => startInfoWindow.open(map, startMarker));
-
-      markersRef.current.push(startMarker);
-
-      // End marker (red) - smaller since waypoints are more prominent
-      const endMarker = new google.maps.Marker({
-        position: { lat: endLoc.lat, lng: endLoc.lng },
-        map: map,
-        title: 'Destination',
-        icon: {
-          path: google.maps.SymbolPath.CIRCLE,
-          scale: 8,
-          fillColor: '#EF4444',
-          fillOpacity: 0.9,
-          strokeColor: 'white',
-          strokeWeight: 2,
-        },
-        label: {
-          text: 'D',
-          color: 'white',
-          fontWeight: 'bold',
-        },
-        zIndex: 5,
-      });
-
-      const endInfoWindow = new google.maps.InfoWindow({
-        content: `<div style="font-weight:600;">Destination</div><div>${route.legs[route.legs.length - 1]?.end_address || ''}</div>`,
-      });
-      endMarker.addListener('click', () => endInfoWindow.open(map, endMarker));
-
-      markersRef.current.push(endMarker);
-    }
+        // Fit bounds if not navigating
+        if (!isNavigating && result.routes[0]?.bounds) {
+          map.fitBounds(result.routes[0].bounds, { padding: 80 });
+        }
+      } else {
+        console.error('[MapView] DirectionsService failed:', status);
+        // Fallback: decode and render polyline directly from server response
+        if (route.overview_polyline?.points && (google.maps as any)?.geometry?.encoding?.decodePath) {
+          const decodedPath = (google.maps as any).geometry.encoding.decodePath(route.overview_polyline.points);
+          routePolylineRef.current = new google.maps.Polyline({
+            path: decodedPath,
+            strokeColor: '#4285F4', // Google's blue
+            strokeOpacity: 0.8,
+            strokeWeight: 5,
+            map: map,
+            zIndex: 1,
+          });
+          console.log('[MapView] Fallback: Rendered polyline path with', decodedPath.length, 'points');
+          
+          // Fit bounds
+          if (!isNavigating) {
+            const bounds = new google.maps.LatLngBounds();
+            decodedPath.forEach((point: google.maps.LatLng) => bounds.extend(point));
+            if (addedStops && addedStops.length > 0) {
+              addedStops.forEach(stop => {
+                if (stop.location) bounds.extend(new google.maps.LatLng(stop.location.lat, stop.location.lng));
+              });
+            }
+            map.fitBounds(bounds, { padding: 80 });
+          }
+        }
+      }
+    });
   }, [route, isNavigating, mapLoaded, addedStops]);
 
-  // Handle added stops rendering (waypoints - shown as prominent numbered markers)
+  // Render custom numbered markers with category-specific icons for stops
   useEffect(() => {
     if (!mapRef.current || !mapLoaded) return;
 
     // Clear existing waypoint markers
-    waypointMarkersRef.current.forEach(marker => {
-      marker.setMap(null);
-    });
+    waypointMarkersRef.current.forEach(marker => marker.setMap(null));
     waypointMarkersRef.current = [];
+    
+    // Clear start/end markers
+    markersRef.current.forEach(marker => {
+      if (marker !== userLocationMarkerRef.current) marker.setMap(null);
+    });
+    markersRef.current = userLocationMarkerRef.current ? [userLocationMarkerRef.current] : [];
 
-    if (addedStops.length === 0) return;
+    if (addedStops.length === 0 || !route?.legs?.[0]) return;
 
-    console.log('[MapView] Rendering waypoint markers for added stops:', addedStops.length);
+    const map = mapRef.current;
 
-    const colorMap: Record<string, string> = {
-      gas: '#2563EB',
-      restaurant: '#EA580C',
-      scenic: '#9333EA',
+    // Add start marker
+    const startLoc = route.legs[0].start_location;
+    const startMarker = new google.maps.Marker({
+      position: { lat: startLoc.lat, lng: startLoc.lng },
+      map,
+      title: 'Start',
+      icon: {
+        url: 'https://maps.google.com/mapfiles/ms/icons/green-dot.png',
+        scaledSize: new google.maps.Size(32, 32),
+      },
+      zIndex: 50,
+    });
+    markersRef.current.push(startMarker);
+
+    // Add destination marker
+    const endLoc = route.legs[route.legs.length - 1].end_location;
+    const endMarker = new google.maps.Marker({
+      position: { lat: endLoc.lat, lng: endLoc.lng },
+      map,
+      title: 'Destination',
+      icon: {
+        url: 'https://maps.google.com/mapfiles/ms/icons/red-dot.png',
+        scaledSize: new google.maps.Size(32, 32),
+      },
+      zIndex: 50,
+    });
+    markersRef.current.push(endMarker);
+
+    // Category-specific icon URLs
+    const getCategoryIcon = (category: string | undefined, type: string): string => {
+      const cat = ((category || type) || '').toLowerCase();
+      if (!cat) return 'https://maps.google.com/mapfiles/ms/icons/blue-dot.png';
+      if (cat.includes('chinese') || cat.includes('noodle')) return 'https://maps.google.com/mapfiles/ms/icons/restaurant.png';
+      if (cat.includes('boba') || cat.includes('bubble') || cat.includes('tea')) return 'https://maps.google.com/mapfiles/ms/icons/coffeehouse.png';
+      if (cat.includes('sushi') || cat.includes('japanese')) return 'https://maps.google.com/mapfiles/ms/icons/restaurant.png';
+      if (cat.includes('gas') || cat.includes('fuel')) return 'https://maps.google.com/mapfiles/ms/icons/gas.png';
+      if (cat.includes('coffee')) return 'https://maps.google.com/mapfiles/ms/icons/coffeehouse.png';
+      if (cat.includes('restaurant') || cat.includes('food')) return 'https://maps.google.com/mapfiles/ms/icons/restaurant.png';
+      if (cat.includes('scenic') || cat.includes('viewpoint')) return 'https://maps.google.com/mapfiles/ms/icons/camera.png';
+      return 'https://maps.google.com/mapfiles/ms/icons/blue-dot.png';
     };
 
-    // Render added stops as waypoint markers (larger, more prominent, numbered)
+    // Render numbered waypoint markers with category icons
     addedStops.forEach((stop, index) => {
-      if (!stop.location || !mapRef.current) return;
+      if (!stop.location) return;
 
       const marker = new google.maps.Marker({
         position: { lat: stop.location.lat, lng: stop.location.lng },
-        map: mapRef.current,
-        title: `Waypoint ${index + 1}: ${stop.name}`,
+        map,
+        title: `${index + 1}. ${stop.name}`,
+        icon: {
+          url: getCategoryIcon(stop.category || '', stop.type),
+          scaledSize: new google.maps.Size(32, 32),
+        },
         label: {
           text: `${index + 1}`,
-          fontSize: '12px',
-          fontWeight: 'bold',
           color: 'white',
+          fontSize: '14px',
+          fontWeight: 'bold',
         },
-        icon: {
-          path: google.maps.SymbolPath.CIRCLE,
-          scale: 18,
-          fillColor: colorMap[stop.type] || '#3B82F6',
-          fillOpacity: 1,
-          strokeColor: 'white',
-          strokeWeight: 3,
-        },
-        zIndex: 100, // Highest z-index for waypoint markers
+        zIndex: 100 + index,
       });
 
       const infoWindow = new google.maps.InfoWindow({
-        content: `<div style="padding: 8px;">
-          <strong>Waypoint ${index + 1}: ${stop.name}</strong><br>
-          <span style="text-transform: capitalize; color: ${colorMap[stop.type] || '#3B82F6'};">${stop.category || stop.type}</span><br>
-          <small style="color: #10B981; font-weight: bold;">✓ Added to route</small>
+        content: `<div style="padding:8px;">
+          <strong>${index + 1}. ${stop.name}</strong><br>
+          <span style="text-transform:capitalize;">${stop.category || stop.type}</span>
         </div>`,
       });
 
-      marker.addListener('click', () => {
-        infoWindow.open(mapRef.current!, marker);
-      });
-
+      marker.addListener('click', () => infoWindow.open(map, marker));
       waypointMarkersRef.current.push(marker);
     });
 
-    // Note: Bounds fitting is handled in route rendering effect to include route polyline
-  }, [addedStops, mapLoaded]);
+    console.log('[MapView] Rendered', addedStops.length, 'numbered waypoint markers');
+  }, [addedStops, route, mapLoaded]);
 
   // Handle stops rendering (available stops - shown as smaller markers)
   useEffect(() => {
@@ -594,13 +570,22 @@ export default function MapView({ route, stops = [], addedStops = [], isNavigati
       // Switch back to overview mode
       map.setTilt(0); // Flat map view
 
-      if (route) {
+      if (route && route.bounds) {
         // If there's a route, fit to route bounds
-        const decodedPath = google.maps.geometry.encoding.decodePath(route.overview_polyline.points);
-        const bounds = new google.maps.LatLngBounds();
-        decodedPath.forEach((point) => {
-          bounds.extend(point);
-        });
+        const bounds = new google.maps.LatLngBounds(
+          new google.maps.LatLng(route.bounds.southwest.lat, route.bounds.southwest.lng),
+          new google.maps.LatLng(route.bounds.northeast.lat, route.bounds.northeast.lng)
+        );
+        
+        // Include waypoints in bounds
+        if (addedStops && addedStops.length > 0) {
+          addedStops.forEach(stop => {
+            if (stop.location) {
+              bounds.extend({ lat: stop.location.lat, lng: stop.location.lng });
+            }
+          });
+        }
+        
         map.fitBounds(bounds, { padding: 50 });
       } else {
         // Otherwise, zoom out to standard view

@@ -1,10 +1,12 @@
 import type { Express, Request, Response } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
-import { parseUserRequest, generateConversationalResponse, generateStopReason, generateItineraryWithStops } from "./gemini";
+import { parseUserRequest, generateConversationalResponse, generateStopReason, generateItineraryWithStops } from "./gpt";
 import { getDirections, findPlacesAlongRoute, calculateGasStops, reverseGeocode, verifyGasStationQuality, verifyRestaurantAttributes, getPlaceDetails } from "./maps";
 import { findRouteConciergeStops } from "./concierge";
 import { insertTripRequestSchema, insertConversationMessageSchema } from "@shared/schema";
+import { calculateArrivalDeadline, calculateTimeAllocations, formatDuration } from "./timeUtils";
+import OpenAI, { AzureOpenAI } from "openai";
 
 export async function registerRoutes(app: Express): Promise<Server> {
   app.post("/api/chat", async (req: Request, res: Response) => {
@@ -77,16 +79,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const origin = await reverseGeocode(lat, lng);
         if (origin) {
           tripParameters.origin = origin;
-          console.log('[chat] Reverse geocoded origin from current location:', origin);
+          console.log('[chat] Reverse geocoded origin from current location (explicit action):', origin);
         }
         delete tripParameters.action;
       } else if (!tripParameters.origin && userLocation) {
-        // User mentioned current location but Gemini may not have set action
+        // No origin provided - automatically use current location as starting point
         const { lat, lng } = userLocation;
         const origin = await reverseGeocode(lat, lng);
         if (origin) {
           tripParameters.origin = origin;
-          console.log('[chat] Filled missing origin from current location:', origin);
+          console.log('[chat] Auto-filled origin from current location (no starting position specified):', origin);
+        } else {
+          console.warn('[chat] Could not reverse geocode current location, using coordinates directly');
+          // Use coordinates directly if reverse geocoding fails
+          tripParameters.origin = `${lat},${lng}`;
         }
       }
 
@@ -140,11 +146,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
 
+      // Check if user requested stops
+      const hasRequestedStops = tripParameters.preferences?.requestedStops &&
+        Object.values(tripParameters.preferences.requestedStops).some(v => v === true);
+
       res.json({
         response: aiResponse,
         tripRequestId: currentTripId,
         tripParameters,
         hasMissingInfo,
+        requestedStops: hasRequestedStops,
       });
     } catch (error: any) {
       console.error('Chat error:', error);
@@ -364,6 +375,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 const station = bestStation.station;
                 const quality = bestStation.quality;
                 
+                // Check if this station is already in the stops array
+                if (stops.find(s => s.name === station.name)) {
+                  console.log(`[find-stops] Skipping duplicate gas station: ${station.name}`);
+                  continue; // Skip to next gas stop position
+                }
+                
                 console.log(`[find-stops] Selected gas station: ${station.name} (score: ${bestStation.score.toFixed(0)})`);
                 console.log(`[find-stops] Verified attributes:`, quality.verifiedAttributes);
 
@@ -454,10 +471,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
               const requirements: {
                 vegetarian?: boolean;
                 kidFriendly?: boolean;
-                parking?: boolean;
                 cuisine?: string;
               } = {
-                parking: true, // Assume parking is needed for road trips
               };
 
               if (restaurantPrefs?.cuisine && !wantsVegetarian && !wantsVegan) {
@@ -476,35 +491,62 @@ export async function registerRoutes(app: Express): Promise<Server> {
               return {
                 restaurant,
                 verification,
+                skippedVerification: false,
               };
             })
           );
 
-          // Filter and sort by confidence score and requirements match
-          const validRestaurants = verifiedRestaurants
-            .filter((v): v is NonNullable<typeof v> => v !== null)
+          const evaluatedRestaurants = verifiedRestaurants
+            .filter((v): v is NonNullable<typeof v> => v !== null);
+
+          const hasSpecificRequirements = !!(
+            restaurantPrefs &&
+            (
+              restaurantPrefs.vegetarian ||
+              restaurantPrefs.vegan ||
+              restaurantPrefs.kidFriendly ||
+              restaurantPrefs.cuisine
+            )
+          );
+
+          let selectedRestaurants = evaluatedRestaurants
             .filter(v => {
-              // If user has specific requirements, only include restaurants that match
-              const hasRequirements = restaurantPrefs && (
-                restaurantPrefs.vegetarian ||
-                restaurantPrefs.vegan ||
-                restaurantPrefs.kidFriendly ||
-                restaurantPrefs.cuisine
-              );
-              
-              if (hasRequirements) {
+              if (hasSpecificRequirements) {
                 return v.verification.matchesRequirements;
               }
-              // Otherwise, include all restaurants with decent confidence
               return v.verification.confidenceScore >= 20;
             })
             .sort((a, b) => b.verification.confidenceScore - a.verification.confidenceScore)
             .slice(0, targetRestaurants);
 
-          console.log(`[find-stops] Selected ${validRestaurants.length} verified restaurants`);
+          if (selectedRestaurants.length === 0) {
+            console.log('[find-stops] No restaurants matched strict requirements; relaxing filters');
 
-          // Add verified restaurants to stops
-          for (const { restaurant, verification } of validRestaurants) {
+            const relaxedRestaurants = evaluatedRestaurants
+              .filter(v => v.verification.confidenceScore >= 10 || !hasSpecificRequirements)
+              .sort((a, b) => (b.restaurant.rating || 0) - (a.restaurant.rating || 0))
+              .slice(0, targetRestaurants);
+
+            if (relaxedRestaurants.length > 0) {
+              selectedRestaurants = relaxedRestaurants;
+            } else if (restaurants.length > 0) {
+              console.log('[find-stops] Falling back to top-rated search results without verification');
+              selectedRestaurants = restaurants.slice(0, targetRestaurants).map(restaurant => ({
+                restaurant,
+                verification: {
+                  matchesRequirements: false,
+                  verifiedAttributes: [],
+                  confidenceScore: restaurant.rating ? restaurant.rating * 2 : 0,
+                },
+                skippedVerification: true as boolean,
+              }));
+            }
+          }
+
+          console.log(`[find-stops] Selected ${selectedRestaurants.length} restaurants after applying fallbacks`);
+
+          // Add selected restaurants to stops
+          for (const { restaurant, verification } of selectedRestaurants) {
             console.log(`[find-stops] Selected restaurant: ${restaurant.name}`);
             console.log(`[find-stops] Verified attributes:`, verification.verifiedAttributes);
             console.log(`[find-stops] Confidence score:`, verification.confidenceScore);
@@ -559,6 +601,143 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       } else {
         console.log('[find-stops] Skipping restaurant search - route is short (<3 hours) and not requested');
+      }
+
+      const customStopRequestsRaw = tripRequest.preferences?.customStops;
+      const customStopRequests = Array.isArray(customStopRequestsRaw)
+        ? (customStopRequestsRaw as Array<{
+          id: string;
+          label?: string;
+          keywords?: string[];
+          placeTypes?: string[];
+          minRating?: number;
+        }>)
+        : [];
+
+      if (customStopRequests.length > 0) {
+        console.log('[find-stops] Processing custom stop requests:', customStopRequests.map(stop => stop.label || stop.id));
+
+        for (const customStop of customStopRequests) {
+          if (!customStop || !customStop.keywords || customStop.keywords.length === 0) {
+            console.warn('[find-stops] Skipping custom stop with insufficient data:', customStop);
+            continue;
+          }
+
+          const placeTypes = customStop.placeTypes && customStop.placeTypes.length > 0
+            ? customStop.placeTypes
+            : ['restaurant'];
+          const keywords = customStop.keywords;
+          const minimumRating =
+            customStop.minRating ??
+            tripRequest.preferences?.restaurantPreferences?.rating ??
+            4.0;
+
+          let selectedPlace: any | null = null;
+          let selectedKeyword: string | null = null;
+          let selectedType: string | null = null;
+
+          for (const placeType of placeTypes) {
+            for (const keyword of keywords) {
+              const searchResults = await findPlacesAlongRoute(
+                polyline,
+                placeType as any,
+                {
+                  rating: minimumRating,
+                  keyword,
+                }
+              );
+
+              const filteredResults = searchResults.filter(result =>
+                !stops.some(existingStop => existingStop.name === result.name)
+              );
+
+              if (filteredResults.length > 0) {
+                selectedPlace = filteredResults[0];
+                selectedKeyword = keyword;
+                selectedType = placeType;
+                break;
+              }
+            }
+
+            if (selectedPlace) {
+              break;
+            }
+          }
+
+          if (!selectedPlace) {
+            console.warn(`[find-stops] No places found for custom request "${customStop.label || customStop.id}"`);
+            continue;
+          }
+
+          let verification: { verifiedAttributes: string[]; confidenceScore: number } = {
+            verifiedAttributes: [],
+            confidenceScore: 0,
+          };
+
+          try {
+            verification = await verifyRestaurantAttributes(selectedPlace);
+          } catch (verificationError) {
+            console.warn('[find-stops] Verification failed for custom stop:', verificationError);
+          }
+
+          const contextSegments = [
+            `Custom stop "${customStop.label || customStop.id}" requested along your ${routeDistanceMiles.toFixed(0)}-mile journey from ${tripRequest.origin} to ${tripRequest.destination}`,
+          ];
+
+          if (selectedKeyword) {
+            contextSegments.push(`Keyword focus: ${selectedKeyword}`);
+          }
+
+          if (selectedType) {
+            contextSegments.push(`Place type targeted: ${selectedType}`);
+          }
+
+          if (verification.verifiedAttributes.length > 0) {
+            contextSegments.push(`Verified attributes: ${verification.verifiedAttributes.join(', ')}`);
+          }
+
+          const reason = await generateStopReason(
+            'restaurant',
+            selectedPlace.name,
+            {
+              ...selectedPlace,
+              verifiedAttributes: verification.verifiedAttributes,
+            },
+            contextSegments.join('. ')
+          );
+
+          const details = await getPlaceDetails(selectedPlace.place_id);
+          const hours = details?.opening_hours?.open_now !== undefined
+            ? (details.opening_hours.open_now ? 'Open now' : 'Closed')
+            : 'Hours vary';
+
+          // Determine stop type based on custom stop ID or label
+          let stopType = 'restaurant';
+          if (customStop.id === 'grocery' || customStop.label?.toLowerCase().includes('grocery')) {
+            stopType = 'grocery';
+          } else if (customStop.id === 'coffee' || customStop.label?.toLowerCase().includes('coffee')) {
+            stopType = 'coffee';
+          } else if (customStop.id === 'dessert' || customStop.label?.toLowerCase().includes('dessert')) {
+            stopType = 'dessert';
+          } else if (customStop.id === 'tea' || customStop.label?.toLowerCase().includes('tea')) {
+            stopType = 'tea';
+          } else if (customStop.id === 'bubbleTea' || customStop.label?.toLowerCase().includes('bubble')) {
+            stopType = 'bubbleTea';
+          }
+
+          stops.push({
+            type: stopType,
+            name: selectedPlace.name,
+            category: customStop.label || selectedPlace.types?.[0]?.replace(/_/g, ' ') || 'Food & Drink',
+            rating: selectedPlace.rating,
+            priceLevel: selectedPlace.price_level ? '$'.repeat(selectedPlace.price_level) : undefined,
+            hours,
+            distanceOffRoute: '0.4 mi',
+            reason,
+            location: selectedPlace.geometry.location,
+            verifiedAttributes: verification.verifiedAttributes,
+          });
+        }
       }
 
       // Step 3: Find scenic stops if requested OR route is scenic/very long
@@ -647,6 +826,85 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
         } catch (error) {
           console.error('[find-stops] Error finding fallback places:', error);
+        }
+      }
+
+      // Calculate time allocations if time constraints are present
+      let timeConstraintInfo: any = null;
+      const timeConstraints = tripRequest.preferences?.timeConstraints;
+      if (timeConstraints && (timeConstraints.arrivalTime || timeConstraints.arrivalTimeHours)) {
+        console.log('[find-stops] Time constraints detected, calculating time allocations');
+        
+        try {
+          const { deadline, departure } = calculateArrivalDeadline(timeConstraints);
+          
+          if (deadline && stops.length > 0) {
+            // Calculate route duration in minutes
+            const routeDurationMinutes = routeDuration / 60;
+            
+            // Prepare stop data for time calculation
+            // For now, we'll estimate travel times between stops (this could be improved with actual route calculations)
+            const stopsWithTravelTimes = stops.map((stop, index) => {
+              // Estimate: assume stops are evenly spaced along route
+              // Actual implementation would calculate real travel times
+              const segments = stops.length + 1; // segments between stops + to/from stops
+              const segmentTime = routeDurationMinutes / segments;
+              
+              return {
+                name: stop.name,
+                type: stop.type,
+                travelTimeFromPreviousMinutes: index === 0 ? segmentTime : segmentTime,
+                travelTimeToNextMinutes: index === stops.length - 1 ? segmentTime : segmentTime,
+              };
+            });
+            
+            // Calculate time allocations
+            const timeCalculation = calculateTimeAllocations(
+              deadline,
+              departure,
+              routeDurationMinutes,
+              stopsWithTravelTimes,
+              10 // 10 minute buffer
+            );
+            
+            console.log('[find-stops] Time calculation result:', {
+              totalTravelTime: formatDuration(timeCalculation.totalTravelTimeMinutes),
+              availableForStops: formatDuration(timeCalculation.availableTimeForStopsMinutes),
+              isFeasible: timeCalculation.isFeasible,
+              warning: timeCalculation.warning,
+            });
+            
+            // Add time allocation info to each stop
+            stops.forEach((stop) => {
+              const recommendedMinutes = timeCalculation.recommendedStopDurations.get(stop.name);
+              const maxMinutes = timeCalculation.maxStopDurations.get(stop.name);
+              
+              if (recommendedMinutes !== undefined) {
+                stop.recommendedDurationMinutes = recommendedMinutes;
+                stop.recommendedDuration = formatDuration(recommendedMinutes);
+              }
+              if (maxMinutes !== undefined) {
+                stop.maxDurationMinutes = maxMinutes;
+                stop.maxDuration = formatDuration(maxMinutes);
+              }
+            });
+            
+            // Store time constraint info to return in response
+            timeConstraintInfo = {
+              arrivalDeadline: deadline.toISOString(),
+              departureTime: departure?.toISOString(),
+              totalTravelTimeMinutes: timeCalculation.totalTravelTimeMinutes,
+              availableTimeForStopsMinutes: timeCalculation.availableTimeForStopsMinutes,
+              isFeasible: timeCalculation.isFeasible,
+              warning: timeCalculation.warning,
+            };
+            
+            if (timeCalculation.warning) {
+              console.warn('[find-stops] Time constraint warning:', timeCalculation.warning);
+            }
+          }
+        } catch (error) {
+          console.error('[find-stops] Error calculating time allocations:', error);
         }
       }
 
@@ -767,7 +1025,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
             console.log('[find-stops] Stops sorted by position along route:', sortedStops.map(s => s.name).join(' -> '));
           }
 
-          const waypoints = sortedStops.map(stop => ({
+          // Limit to at most 8 waypoints to avoid Directions API limits and keep routes stable
+          const waypoints = sortedStops.slice(0, 8).map(stop => ({
             name: stop.name,
             location: stop.location!,
           }));
@@ -778,7 +1037,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             const apiKey = process.env.GOOGLE_MAPS_API_KEY;
             if (!apiKey) {
               console.error('[find-stops] Google Maps API key not found');
-              return res.json({ stops, route: tripRequest.route }); // Return stops without recalculating route
+              return res.json({ stops, route: tripRequest.route, timeConstraintInfo }); // Return stops without recalculating route
             }
 
             // Use coordinates from the original route if available, otherwise use addresses
@@ -825,7 +1084,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             if (!directionsResponse.ok) {
               console.error('[find-stops] Directions API HTTP error:', directionsResponse.status);
               // Continue without recalculating route
-              return res.json({ stops, route: tripRequest.route });
+              return res.json({ stops, route: tripRequest.route, timeConstraintInfo });
             }
 
             const directionsData = await directionsResponse.json();
@@ -846,23 +1105,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
               return res.json({ 
                 stops,
                 route: updatedRoute, // Return the updated route with waypoints
+                timeConstraintInfo,
               });
             } else {
               console.warn('[find-stops] Directions API returned non-OK status:', directionsData.status, directionsData.error_message);
               console.warn('[find-stops] Continuing with original route');
               // Continue with original route if waypoints fail
-              return res.json({ stops, route: tripRequest.route });
+              return res.json({ stops, route: tripRequest.route, timeConstraintInfo });
             }
           }
         } catch (routeError) {
           console.error('[find-stops] Error recalculating route with waypoints:', routeError);
           // Continue without recalculating route if there's an error
-          return res.json({ stops, route: tripRequest.route });
+          return res.json({ stops, route: tripRequest.route, timeConstraintInfo });
         }
       }
 
       console.log(`[find-stops] Returning ${stops.length} stops for trip ${tripRequestId}`);
-      res.json({ stops, route: tripRequest.route });
+      res.json({ stops, route: tripRequest.route, timeConstraintInfo });
     } catch (error: any) {
       console.error('Find stops error:', error);
       res.status(500).json({ error: error.message });
@@ -917,9 +1177,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
 
-      // Build waypoints string for Google Maps API
+      // Build waypoints string for Google Maps API (cap to 8)
       // Format: "location1|location2|location3"
-      const waypointsParam = waypoints.map(wp => {
+      const limitedWaypoints = waypoints.slice(0, 8);
+      const waypointsParam = limitedWaypoints.map(wp => {
         console.log('[recalculate-route] Waypoint:', wp.name, wp.location);
         return `${wp.location.lat},${wp.location.lng}`;
       }).join('|');
@@ -955,11 +1216,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const url = new URL('https://maps.googleapis.com/maps/api/directions/json');
       url.searchParams.append('origin', origin);
       url.searchParams.append('destination', destination);
-      if (waypoints.length > 0) {
+      if (limitedWaypoints.length > 0) {
+        // optimize:true tells Google to reorder waypoints for the best route
         url.searchParams.append('waypoints', `optimize:true|${waypointsParam}`);
       }
       url.searchParams.append('key', apiKey);
       url.searchParams.append('mode', 'driving');
+      url.searchParams.append('alternatives', 'false'); // Single optimized route
       if (tripRequest.preferences?.avoidTolls) {
         url.searchParams.append('avoid', 'tolls');
       }
@@ -1002,17 +1265,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const newRoute = data.routes[0];
       console.log('[recalculate-route] Successfully calculated route with waypoints');
+      console.log('[recalculate-route] Optimized waypoint_order:', newRoute.waypoint_order);
 
-      // Update trip request with new route (waypoints are included in route response)
+      // Reorder waypoints according to Google's optimization
+      let reorderedWaypoints = limitedWaypoints;
+      if (newRoute.waypoint_order && newRoute.waypoint_order.length > 0) {
+        reorderedWaypoints = newRoute.waypoint_order.map((idx: number) => limitedWaypoints[idx]);
+        console.log('[recalculate-route] Waypoints reordered per Google optimization');
+      }
+
+      // Update trip request with new route
       await storage.updateTripRequest(tripRequestId, {
         route: newRoute,
       });
 
-      console.log(`[recalculate-route] Successfully updated trip request with ${waypoints.length} waypoint(s)`);
+      console.log(`[recalculate-route] Successfully updated trip request with ${limitedWaypoints.length} waypoint(s)`);
 
       return res.json({
         route: newRoute,
-        waypoints,
+        waypoints: reorderedWaypoints, // Return in optimized order
       });
     } catch (error: any) {
       console.error('[recalculate-route] Unexpected error:', error);
@@ -1174,6 +1445,222 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
     return summary;
   }
+
+  // Voice transcription endpoint using Azure OpenAI Whisper
+  app.post("/api/transcribe", async (req: Request, res: Response) => {
+    try {
+      console.log('[transcribe] ===== TRANSCRIPTION REQUEST RECEIVED =====');
+      console.log('[transcribe] Request headers:', JSON.stringify(req.headers, null, 2));
+      console.log('[transcribe] Request body keys:', Object.keys(req.body || {}));
+      console.log('[transcribe] Has audio data:', !!req.body?.audio);
+      console.log('[transcribe] Audio data type:', typeof req.body?.audio);
+      if (req.body?.audio) {
+        console.log('[transcribe] Audio data length (chars):', req.body.audio.length);
+        console.log('[transcribe] Audio data prefix (first 100):', req.body.audio.substring(0, 100));
+      }
+      console.log('[transcribe] MIME type from request:', req.body?.mimeType);
+
+      // Check if request has audio data
+      if (!req.body || !req.body.audio) {
+        console.error('[transcribe] No audio data in request body');
+        return res.status(400).json({ error: 'No audio data provided' });
+      }
+
+      // Get Azure OpenAI configuration
+      const azureEndpoint = process.env.AZURE_OPENAI_ENDPOINT;
+      const azureApiKey = process.env.AZURE_OPENAI_API_KEY;
+      // Whisper API may use a different API version than the chat API
+      const whisperApiVersion = process.env.AZURE_OPENAI_WHISPER_API_VERSION || process.env.AZURE_OPENAI_API_VERSION || '2024-06-01';
+      const whisperDeployment = process.env.AZURE_OPENAI_WHISPER_DEPLOYMENT || process.env.AZURE_OPENAI_DEPLOYMENT || 'whisper';
+
+      // Validate configuration
+      if (!azureEndpoint || !azureApiKey) {
+        console.error('[transcribe] Azure OpenAI not configured');
+        return res.status(500).json({ 
+          error: 'Azure OpenAI not configured. Please set AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY' 
+        });
+      }
+
+      if (!whisperDeployment) {
+        console.error('[transcribe] Whisper deployment not configured');
+        return res.status(500).json({ 
+          error: 'Whisper deployment not configured. Please set AZURE_OPENAI_WHISPER_DEPLOYMENT' 
+        });
+      }
+
+      // Normalize endpoint URL (ensure it doesn't end with /)
+      const normalizedEndpoint = azureEndpoint.endsWith('/') 
+        ? azureEndpoint.slice(0, -1) 
+        : azureEndpoint;
+
+      // Construct the Azure OpenAI Whisper endpoint URL
+      // Format: {endpoint}/openai/deployments/{deployment}/audio/transcriptions?api-version={version}
+      const whisperUrl = `${normalizedEndpoint}/openai/deployments/${whisperDeployment}/audio/transcriptions?api-version=${whisperApiVersion}`;
+
+      console.log('[transcribe] Using Whisper configuration:', {
+        endpoint: normalizedEndpoint,
+        deployment: whisperDeployment,
+        apiVersion: whisperApiVersion,
+        url: whisperUrl
+      });
+
+      // Extract audio data (expecting base64 encoded audio)
+      console.log('[transcribe] ===== EXTRACTING AUDIO DATA =====');
+      const audioData = req.body.audio;
+      console.log('[transcribe] audioData type:', typeof audioData);
+      console.log('[transcribe] audioData length:', audioData?.length);
+
+      let audioBuffer: Buffer;
+
+      if (typeof audioData === 'string') {
+        console.log('[transcribe] Audio data is string, converting from base64...');
+        console.log('[transcribe] Has comma separator:', audioData.includes(','));
+
+        // Remove data URL prefix if present (e.g., "data:audio/webm;base64,")
+        const base64Data = audioData.includes(',') ? audioData.split(',')[1] : audioData;
+        console.log('[transcribe] Base64 data length after prefix removal:', base64Data.length);
+        console.log('[transcribe] Base64 first 50 chars:', base64Data.substring(0, 50));
+
+        audioBuffer = Buffer.from(base64Data, 'base64');
+        console.log('[transcribe] Buffer created from base64');
+      } else if (Buffer.isBuffer(audioData)) {
+        console.log('[transcribe] Audio data is already a Buffer');
+        audioBuffer = audioData;
+      } else {
+        console.error('[transcribe] Invalid audio format, type:', typeof audioData);
+        return res.status(400).json({ error: 'Invalid audio format. Expected base64 string or buffer' });
+      }
+
+      console.log('[transcribe] Audio buffer created, length:', audioBuffer.length, 'bytes');
+
+      if (audioBuffer.length === 0) {
+        console.error('[transcribe] Audio buffer is empty (0 bytes)');
+        return res.status(400).json({ error: 'Audio buffer is empty' });
+      }
+
+      console.log('[transcribe] Audio buffer first 20 bytes:', audioBuffer.slice(0, 20));
+
+      // Determine file extension and MIME type
+      const mimeType = req.body.mimeType || 'audio/webm';
+      let fileExtension = 'webm';
+      if (mimeType.includes('wav')) fileExtension = 'wav';
+      else if (mimeType.includes('mp3')) fileExtension = 'mp3';
+      else if (mimeType.includes('m4a')) fileExtension = 'm4a';
+      else if (mimeType.includes('ogg')) fileExtension = 'ogg';
+      else if (mimeType.includes('mp4')) fileExtension = 'mp4';
+
+      // Create FormData for multipart/form-data request
+      // Node.js 18+ has native FormData support
+      console.log('[transcribe] ===== CREATING FORMDATA =====');
+      const filename = `audio.${fileExtension}`;
+      console.log('[transcribe] Filename:', filename);
+      console.log('[transcribe] File extension:', fileExtension);
+      console.log('[transcribe] MIME type:', mimeType);
+
+      // Convert Buffer to Uint8Array for Blob compatibility
+      console.log('[transcribe] Converting Buffer to Uint8Array...');
+      const uint8Array = new Uint8Array(audioBuffer);
+      console.log('[transcribe] Uint8Array created, length:', uint8Array.length);
+      console.log('[transcribe] Uint8Array first 20 bytes:', Array.from(uint8Array.slice(0, 20)));
+
+      // Create a Blob from the buffer for FormData
+      console.log('[transcribe] Creating Blob for FormData...');
+      const audioBlob = new Blob([uint8Array], { type: mimeType });
+      console.log('[transcribe] Blob created, size:', audioBlob.size, 'bytes');
+      console.log('[transcribe] Blob type:', audioBlob.type);
+
+      // Create FormData
+      console.log('[transcribe] Creating FormData...');
+      const formData = new FormData();
+      formData.append('file', audioBlob, filename);
+      formData.append('language', 'en');
+      formData.append('response_format', 'text');
+      console.log('[transcribe] FormData created with fields: file, language, response_format');
+
+      console.log('[transcribe] ===== CALLING AZURE OPENAI WHISPER API =====');
+      console.log('[transcribe] Request details:', {
+        url: whisperUrl,
+        method: 'POST',
+        filename: filename,
+        mimeType: mimeType,
+        audioSize: audioBuffer.length,
+        blobSize: audioBlob.size,
+        language: 'en',
+        responseFormat: 'text'
+      });
+
+      // Make direct HTTP request to Azure OpenAI Whisper API
+      // Use native fetch (Node.js 18+) which has better FormData support
+      // Note: FormData will set Content-Type with boundary automatically
+      const response = await fetch(whisperUrl, {
+        method: 'POST',
+        headers: {
+          'api-key': azureApiKey,
+          // Don't set Content-Type - FormData will set it with boundary automatically
+        },
+        body: formData,
+      });
+
+      console.log('[transcribe] Response status:', response.status, response.statusText);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        let errorData: any;
+        try {
+          errorData = JSON.parse(errorText);
+        } catch {
+          errorData = { error: errorText };
+        }
+        
+        console.error('[transcribe] Azure OpenAI API error:', {
+          status: response.status,
+          statusText: response.statusText,
+          error: errorData
+        });
+
+        return res.status(response.status).json({
+          error: errorData.error?.message || errorData.error || `Azure OpenAI API error: ${response.status} ${response.statusText}`,
+          details: errorData,
+          status: response.status
+        });
+      }
+
+      // Get transcription text (response_format=text returns plain text)
+      const transcriptText = await response.text();
+      
+      if (!transcriptText || transcriptText.trim().length === 0) {
+        console.warn('[transcribe] Empty transcription received');
+        return res.status(500).json({ error: 'Received empty transcription from Azure OpenAI' });
+      }
+
+      console.log('[transcribe] Transcription successful:', transcriptText.trim());
+
+      res.json({ 
+        transcript: transcriptText.trim(),
+        language: 'en'
+      });
+    } catch (error: any) {
+      console.error('[transcribe] Transcription error:', error);
+      console.error('[transcribe] Error stack:', error.stack);
+      
+      // Provide more detailed error information
+      let errorMessage = error.message || 'Failed to transcribe audio';
+      let errorDetails: any = error.message;
+      
+      if (error.code === 'ENOTFOUND' || error.code === 'ECONNREFUSED') {
+        errorMessage = 'Failed to connect to Azure OpenAI endpoint. Please check your endpoint URL.';
+        errorDetails = error.message;
+      } else if (error.response) {
+        errorDetails = error.response.data || error.response.statusText;
+      }
+
+      res.status(500).json({ 
+        error: errorMessage,
+        details: errorDetails,
+        code: error.code
+      });
+    }
+  });
 
   const httpServer = createServer(app);
 

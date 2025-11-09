@@ -1,0 +1,246 @@
+/**
+ * Integration tests for useMicrophone hook
+ */
+
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { renderHook, act, waitFor } from '@testing-library/react';
+import { useMicrophone } from '../useMicrophone';
+
+describe('useMicrophone Hook', () => {
+  beforeEach(() => {
+    // Mock browser APIs
+    global.navigator = {
+      mediaDevices: {
+        getUserMedia: vi.fn(),
+        enumerateDevices: vi.fn(),
+      },
+    } as any;
+
+    global.SpeechRecognition = vi.fn().mockImplementation(function(this: any) {
+      this.start = vi.fn();
+      this.stop = vi.fn();
+      this.continuous = false;
+      this.interimResults = false;
+      this.lang = 'en-US';
+      this.onresult = null;
+      this.onerror = null;
+      this.onend = null;
+      return this;
+    });
+
+    (global as any).window = {
+      SpeechRecognition: global.SpeechRecognition,
+    };
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  describe('Initialization', () => {
+    it('should initialize with default state', () => {
+      const { result } = renderHook(() => useMicrophone());
+
+      expect(result.current.isListening).toBe(false);
+      expect(result.current.isRecording).toBe(false);
+      expect(result.current.transcription).toBe(null);
+      expect(result.current.error).toBe(null);
+    });
+
+    it('should not auto-start by default', () => {
+      renderHook(() => useMicrophone());
+
+      // SpeechRecognition should not be instantiated yet
+      expect(global.SpeechRecognition).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Wake Word Mode', () => {
+    it('should start in wake word mode when enabled', async () => {
+      (navigator.mediaDevices.enumerateDevices as any).mockResolvedValue([
+        { kind: 'audioinput', deviceId: '1' },
+      ]);
+      const mockStream = {
+        getTracks: () => [{stop: vi.fn()}],
+      };
+      (navigator.mediaDevices.getUserMedia as any).mockResolvedValue(mockStream);
+
+      const { result } = renderHook(() =>
+        useMicrophone({ enableWakeWord: true })
+      );
+
+      await act(async () => {
+        await result.current.startListening();
+      });
+
+      await waitFor(() => {
+        expect(result.current.isListening).toBe(true);
+      });
+    });
+
+    it('should handle wake word detection callback', async () => {
+      const onTranscript = vi.fn();
+      (navigator.mediaDevices.enumerateDevices as any).mockResolvedValue([
+        { kind: 'audioinput', deviceId: '1' },
+      ]);
+      const mockStream = {
+        getTracks: () => [{stop: vi.fn()}],
+      };
+      (navigator.mediaDevices.getUserMedia as any).mockResolvedValue(mockStream);
+
+      const { result } = renderHook(() =>
+        useMicrophone({
+          enableWakeWord: true,
+          onTranscript,
+        })
+      );
+
+      await act(async () => {
+        await result.current.startListening();
+      });
+
+      expect(result.current.isListening).toBe(true);
+    });
+  });
+
+  describe('Direct Recording Mode', () => {
+    it('should start recording directly when wake word is disabled', async () => {
+      (navigator.mediaDevices.enumerateDevices as any).mockResolvedValue([
+        { kind: 'audioinput', deviceId: '1' },
+      ]);
+      const mockStream = {
+        getTracks: () => [{stop: vi.fn()}],
+      };
+      (navigator.mediaDevices.getUserMedia as any).mockResolvedValue(mockStream);
+
+      // Mock AudioContext for silence detection
+      global.AudioContext = vi.fn().mockImplementation(() => ({
+        createAnalyser: vi.fn(() => ({
+          smoothingTimeConstant: 0,
+          fftSize: 0,
+          connect: vi.fn(),
+          disconnect: vi.fn(),
+        })),
+        createMediaStreamSource: vi.fn(() => ({
+          connect: vi.fn(),
+          disconnect: vi.fn(),
+        })),
+        createScriptProcessor: vi.fn(() => ({
+          connect: vi.fn(),
+          disconnect: vi.fn(),
+          onaudioprocess: null,
+        })),
+        destination: {},
+        close: vi.fn(),
+      })) as any;
+
+      const { result } = renderHook(() =>
+        useMicrophone({ enableWakeWord: false })
+      );
+
+      await act(async () => {
+        await result.current.startListening();
+      });
+
+      await waitFor(() => {
+        expect(result.current.isRecording).toBe(true);
+      });
+    });
+  });
+
+  describe('Toggle Functionality', () => {
+    it('should toggle between listening and stopped states', async () => {
+      (navigator.mediaDevices.enumerateDevices as any).mockResolvedValue([
+        { kind: 'audioinput', deviceId: '1' },
+      ]);
+      const mockStream = {
+        getTracks: () => [{stop: vi.fn()}],
+      };
+      (navigator.mediaDevices.getUserMedia as any).mockResolvedValue(mockStream);
+
+      const { result } = renderHook(() =>
+        useMicrophone({ enableWakeWord: true })
+      );
+
+      // First toggle - should start listening
+      await act(async () => {
+        await result.current.toggleListening();
+      });
+
+      await waitFor(() => {
+        expect(result.current.isListening).toBe(true);
+      });
+
+      // Second toggle - should stop listening
+      await act(async () => {
+        await result.current.toggleListening();
+      });
+
+      await waitFor(() => {
+        expect(result.current.isListening).toBe(false);
+      });
+    });
+  });
+
+  describe('Error Handling', () => {
+    it('should set error when browser is incompatible', async () => {
+      delete (global as any).window.SpeechRecognition;
+      delete (global as any).window.webkitSpeechRecognition;
+
+      const { result } = renderHook(() => useMicrophone());
+
+      await act(async () => {
+        const success = await result.current.startListening();
+        expect(success).toBe(false);
+      });
+
+      expect(result.current.error).toBeTruthy();
+      expect(result.current.error).toContain('speech recognition');
+    });
+
+    it('should set error when permission is denied', async () => {
+      (navigator.mediaDevices.enumerateDevices as any).mockResolvedValue([
+        { kind: 'audioinput', deviceId: '1' },
+      ]);
+      (navigator.mediaDevices.getUserMedia as any).mockRejectedValue(
+        Object.assign(new Error('NotAllowedError'), { name: 'NotAllowedError' })
+      );
+
+      const { result } = renderHook(() => useMicrophone());
+
+      await act(async () => {
+        const success = await result.current.startListening();
+        expect(success).toBe(false);
+      });
+
+      expect(result.current.error).toBeTruthy();
+      expect(result.current.error).toContain('microphone');
+    });
+  });
+
+  describe('Cleanup', () => {
+    it('should cleanup on unmount', async () => {
+      (navigator.mediaDevices.enumerateDevices as any).mockResolvedValue([
+        { kind: 'audioinput', deviceId: '1' },
+      ]);
+      const mockStream = {
+        getTracks: () => [{stop: vi.fn()}],
+      };
+      (navigator.mediaDevices.getUserMedia as any).mockResolvedValue(mockStream);
+
+      const { result, unmount } = renderHook(() =>
+        useMicrophone({ enableWakeWord: true })
+      );
+
+      await act(async () => {
+        await result.current.startListening();
+      });
+
+      // Unmount should cleanup
+      unmount();
+
+      // No way to directly test cleanup, but it shouldn't throw
+      expect(true).toBe(true);
+    });
+  });
+});

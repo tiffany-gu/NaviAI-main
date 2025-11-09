@@ -504,10 +504,26 @@ function extractMenuInfo(details: any, category: string): {
     }
   }
 
+  // Dedupe and normalize (case-insensitive), preserve first-seen casing
+  const uniq = (arr: string[]): string[] => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const raw of arr) {
+      const t = (raw || '').trim();
+      if (!t) continue;
+      const key = t.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        out.push(t);
+      }
+    }
+    return out;
+  };
+
   return {
-    bestItems: bestItems.slice(0, 3), // Limit to top 3 items
-    dietaryNotes: [...new Set(dietaryNotes)], // Remove duplicates
-    parkingNotes: [...new Set(parkingNotes)], // Remove duplicates
+    bestItems: uniq(bestItems).slice(0, 3), // Limit to top 3 items
+    dietaryNotes: uniq(dietaryNotes), // Remove duplicates
+    parkingNotes: uniq(parkingNotes), // Remove duplicates
   };
 }
 
