@@ -79,29 +79,19 @@ export function startWakeWordDetection(
       .toLowerCase()
       .trim();
 
-    // Enhanced logging to see exactly what's being heard
-    console.log('🎤 [Wake Word Detection] Raw transcript:', transcript);
-    console.log('🔍 [Wake Word Detection] Looking for:', WAKE_WORD);
-    console.log('✅ [Wake Word Detection] Contains wake word?', transcript.includes(WAKE_WORD));
-    console.log('📊 [Wake Word Detection] isListening?', isListeningRef());
+    console.log('[Wake Word Detection] Heard:', transcript);
 
-    // Try multiple variations of the wake word
+    // Only match exact wake word or very close variations
     const variations = [
       'hey journey',
       'heyjourney',
       'hey jorney',
-      'a journey',
-      'hey turning',
     ];
 
     const matchedVariation = variations.find(v => transcript.includes(v));
 
-    if (matchedVariation) {
-      console.log('✨ [Wake Word Detection] MATCHED VARIATION:', matchedVariation);
-    }
-
-    if (isListeningRef() && (transcript.includes(WAKE_WORD) || matchedVariation)) {
-      console.log('🎉 [Wake Word Detection] WAKE WORD DETECTED!');
+    if (isListeningRef() && matchedVariation) {
+      console.log('[Wake Word Detection] Wake word detected!');
       isStopping = true;
       try {
         recognition.stop();
@@ -301,16 +291,8 @@ export async function requestMicrophonePermission(): Promise<boolean> {
       return false;
     }
 
-    // Check if microphone devices are available
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const audioDevices = devices.filter(device => device.kind === 'audioinput');
-
-    if (audioDevices.length === 0) {
-      console.error('[Microphone] No audio input devices found');
-      return false;
-    }
-
     // Request permission with longer timeout (15 seconds - enough time for user to allow)
+    // Note: Don't check devices before permission - browsers don't show devices until permission is granted
     const getUserMediaPromise = navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,

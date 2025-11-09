@@ -44,6 +44,7 @@ export function useMicrophone(options: UseMicrophoneOptions = {}) {
     }
 
     // If wake word is enabled, restart listening after recording
+    // Wait longer to avoid catching tail end of previous speech
     if (enableWakeWord && isListeningRef.current) {
       setTimeout(() => {
         if (isListeningRef.current && !wakeWordRecognitionRef.current) {
@@ -53,7 +54,7 @@ export function useMicrophone(options: UseMicrophoneOptions = {}) {
             () => isListeningRef.current
           );
         }
-      }, 1000);
+      }, 2000);
     }
   }, [onTranscript, enableWakeWord]);
 

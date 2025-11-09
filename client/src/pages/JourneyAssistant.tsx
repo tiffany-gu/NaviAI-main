@@ -46,6 +46,7 @@ export default function JourneyAssistant() {
   const [routeData, setRouteData] = useState<any>(null);
   const [stops, setStops] = useState<Stop[]>([]);
   const [addedStops, setAddedStops] = useState<Array<{ type: string; name: string; location: { lat: number; lng: number }; category?: string }>>([]);
+  const [userRequestedStops, setUserRequestedStops] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
 
@@ -157,7 +158,7 @@ export default function JourneyAssistant() {
     },
     onSuccess: (data: any) => {
       const aiMessage: Message = {
-        id: Date.now().toString(),
+        id: crypto.randomUUID(),
         text: data.response,
         isUser: false,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -165,7 +166,20 @@ export default function JourneyAssistant() {
       setMessages((prev) => [...prev, aiMessage]);
 
       if (data.tripRequestId) {
+        // If this is a new trip, reset the stops requested flag
+        if (data.tripRequestId !== tripRequestId) {
+          setUserRequestedStops(false);
+        }
         setTripRequestId(data.tripRequestId);
+      }
+
+      // Track if user requested stops
+      if (data.requestedStops) {
+        setUserRequestedStops(true);
+        // If route already exists and user is now asking for stops, find them
+        if (routeData && data.tripRequestId) {
+          findStopsMutation.mutate(data.tripRequestId);
+        }
       }
 
       if (!data.hasMissingInfo && data.tripRequestId) {
@@ -189,16 +203,26 @@ export default function JourneyAssistant() {
     onSuccess: (data: any, variables: string) => {
       console.log('[planRouteMutation] Route data received, legs:', data.selectedRoute?.legs?.length || 0);
       setRouteData(data.selectedRoute);
-      
-      const routeMessage: Message = {
-        id: Date.now().toString(),
-        text: "I've found your route! Let me find some great stops along the way...",
-        isUser: false,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-      };
-      setMessages((prev) => [...prev, routeMessage]);
 
-      findStopsMutation.mutate(variables);
+      // Only find stops if user explicitly requested them
+      if (userRequestedStops) {
+        const routeMessage: Message = {
+          id: crypto.randomUUID(),
+          text: "I've found your route! Let me find some great stops along the way...",
+          isUser: false,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        };
+        setMessages((prev) => [...prev, routeMessage]);
+        findStopsMutation.mutate(variables);
+      } else {
+        const routeMessage: Message = {
+          id: crypto.randomUUID(),
+          text: "I've found your route! If you'd like me to find stops along the way, just ask (e.g., 'find a restaurant' or 'find a gas station').",
+          isUser: false,
+          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        };
+        setMessages((prev) => [...prev, routeMessage]);
+      }
     },
     onError: (error: Error) => {
       toast({
@@ -232,19 +256,19 @@ export default function JourneyAssistant() {
         // we should mark those stops as "added" so they show as waypoints
         // However, for now, we'll let users manually add stops via the UI
         // The route already includes them as waypoints in the backend response
-        
+
         const routeMessage: Message = {
-          id: Date.now().toString(),
+          id: crypto.randomUUID(),
           text: `Route recalculated to include ${data.stops?.length || 0} stop${data.stops?.length !== 1 ? 's' : ''}. The directions now go through each stop in order.`,
           isUser: false,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
         setMessages((prev) => [...prev, routeMessage]);
       }
-      
+
       if (data.stops && data.stops.length > 0) {
         const stopsMessage: Message = {
-          id: Date.now().toString(),
+          id: crypto.randomUUID(),
           text: `Found ${data.stops.length} recommended stop${data.stops.length > 1 ? 's' : ''} along your route! Click "Add to Route" to include them in your directions.`,
           isUser: false,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -252,7 +276,7 @@ export default function JourneyAssistant() {
         setMessages((prev) => [...prev, stopsMessage]);
       } else {
         const noStopsMessage: Message = {
-          id: Date.now().toString(),
+          id: crypto.randomUUID(),
           text: "I couldn't find any stops along this route. Try adding preferences like restaurant types or scenic views to get better recommendations.",
           isUser: false,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -271,7 +295,7 @@ export default function JourneyAssistant() {
 
   const handleSendMessage = (text: string) => {
     const userMessage: Message = {
-      id: Date.now().toString(),
+      id: crypto.randomUUID(),
       text,
       isUser: true,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -490,10 +514,10 @@ export default function JourneyAssistant() {
         title: "Route Updated",
         description: `Route recalculated! ${distanceMiles} miles, ${durationWithStopsText} total (${stopCount} stop${stopCount !== 1 ? 's' : ''})`,
       });
-      
+
       // Add message to chat about the route update
       const routeUpdateMessage: Message = {
-        id: Date.now().toString(),
+        id: crypto.randomUUID(),
         text: `Route updated! Your journey now includes ${stopCount} stop${stopCount !== 1 ? 's' : ''}. Estimated travel time: ${durationWithStopsText} (including ${stopCount * 10} minutes for stops), Total distance: ${distanceMiles} miles.`,
         isUser: false,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -544,9 +568,9 @@ export default function JourneyAssistant() {
               
               {stops.length > 0 && (
                 <div className="space-y-3" data-testid="container-stops">
-                  {stops.map((stop, index) => (
+                  {stops.map((stop) => (
                     <StopCard
-                      key={index}
+                      key={`${stop.name}-${stop.type}`}
                       {...stop}
                       onAddToRoute={handleAddStopToRoute}
                       onSkip={() => handleSkipStop(stop)}

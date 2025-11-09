@@ -146,11 +146,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
       }
 
+      // Check if user requested stops
+      const hasRequestedStops = tripParameters.preferences?.requestedStops &&
+        Object.values(tripParameters.preferences.requestedStops).some(v => v === true);
+
       res.json({
         response: aiResponse,
         tripRequestId: currentTripId,
         tripParameters,
         hasMissingInfo,
+        requestedStops: hasRequestedStops,
       });
     } catch (error: any) {
       console.error('Chat error:', error);
