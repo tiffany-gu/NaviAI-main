@@ -448,9 +448,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
                 // Get place details for accurate hours
                 const details = await getPlaceDetails(station.place_id);
-                const hours = details?.opening_hours?.open_now 
+                const hours = details?.opening_hours?.open_now
                   ? (quality.is24Hours ? 'Open 24/7' : 'Open now')
                   : 'Hours vary';
+
+                // Get photo URL from Google Places
+                let photoUrl: string | undefined;
+                if (details?.photos && details.photos.length > 0) {
+                  const photoReference = details.photos[0].photo_reference;
+                  const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+                  if (photoReference && apiKey) {
+                    photoUrl = `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference=${photoReference}&key=${apiKey}`;
+                  }
+                }
 
                 stops.push({
                   type: 'gas',
@@ -462,6 +472,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
                   reason: reason,
                   location: station.geometry.location,
                   verifiedAttributes: quality.verifiedAttributes, // Add verified attributes for UI
+                  // Enhanced Google Places details
+                  address: details?.formatted_address || details?.vicinity,
+                  phone: details?.formatted_phone_number,
+                  website: details?.website,
+                  priceLevel: details?.price_level,
+                  userRatingsTotal: details?.user_ratings_total,
+                  photoUrl,
+                  openNow: details?.opening_hours?.open_now,
                 });
               }
             } catch (error) {
@@ -626,17 +644,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
             const details = await getPlaceDetails(restaurant.place_id);
             const hours = details?.opening_hours?.open_now ? 'Open now' : 'Hours vary';
 
+            // Get photo URL from Google Places
+            let photoUrl: string | undefined;
+            if (details?.photos && details.photos.length > 0) {
+              const photoReference = details.photos[0].photo_reference;
+              const apiKey = process.env.GOOGLE_MAPS_API_KEY;
+              if (photoReference && apiKey) {
+                photoUrl = `https://maps.googleapis.com/maps/api/place/photo?maxwidth=400&photo_reference=${photoReference}&key=${apiKey}`;
+              }
+            }
+
             stops.push({
               type: 'restaurant',
               name: restaurant.name,
               category: restaurant.types?.[0]?.replace(/_/g, ' ') || 'Restaurant',
               rating: restaurant.rating,
-              priceLevel: restaurant.price_level ? '$'.repeat(restaurant.price_level) : '$$',
               hours: hours,
               distanceOffRoute: '0.5 mi',
               reason: reason,
               location: restaurant.geometry.location,
               verifiedAttributes: verification.verifiedAttributes, // Add verified attributes for UI
+              // Enhanced Google Places details
+              address: details?.formatted_address || details?.vicinity,
+              phone: details?.formatted_phone_number,
+              website: details?.website,
+              priceLevel: details?.price_level || restaurant.price_level,
+              userRatingsTotal: details?.user_ratings_total,
+              photoUrl,
+              openNow: details?.opening_hours?.open_now,
             });
           }
         } catch (error) {

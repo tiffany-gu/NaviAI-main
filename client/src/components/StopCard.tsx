@@ -1,6 +1,6 @@
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Fuel, Utensils, Mountain, Star, Clock, MapPin, ShoppingCart } from "lucide-react";
+import { Fuel, Utensils, Mountain, Star, Clock, MapPin, ShoppingCart, Phone, Globe, DollarSign, Users, ExternalLink } from "lucide-react";
 import {
   Collapsible,
   CollapsibleContent,
@@ -23,6 +23,14 @@ interface StopCardProps {
   verifiedAttributes?: string[]; // Grounded attributes verified from Google Maps
   recommendedDuration?: string; // e.g., "30 min"
   maxDuration?: string; // e.g., "60 min"
+  // Enhanced Google Places details
+  address?: string;
+  phone?: string;
+  website?: string;
+  priceLevel?: number; // 1-4 ($, $$, $$$, $$$$)
+  userRatingsTotal?: number;
+  photoUrl?: string; // First photo from Google Places
+  openNow?: boolean;
   onAddToRoute?: (stop: { type: StopType; name: string; location: { lat: number; lng: number } }) => void;
   onSkip?: () => void;
 }
@@ -61,6 +69,13 @@ export default function StopCard({
   verifiedAttributes,
   recommendedDuration,
   maxDuration,
+  address,
+  phone,
+  website,
+  priceLevel,
+  userRatingsTotal,
+  photoUrl,
+  openNow,
   onAddToRoute,
   onSkip,
 }: StopCardProps) {
@@ -70,13 +85,49 @@ export default function StopCard({
   const Icon = iconMap[normalizedType] || iconMap.gas; // Fallback to gas icon if type is invalid
   const displayType = normalizedType;
 
+  // Format price level as $ symbols
+  const getPriceDisplay = (level?: number) => {
+    if (!level) return null;
+    return '$'.repeat(level);
+  };
+
   return (
     <Card className="overflow-visible border-l-4 border-l-primary/30" data-testid={`card-stop-${displayType}`}>
       <div className="p-4 space-y-3">
-        <div className="flex items-start gap-3">
-          <div className={`mt-0.5 ${colorMap[displayType] || colorMap.gas}`}>
-            <Icon className="w-5 h-5" />
+        {/* Photo Header (if available) */}
+        {photoUrl && (
+          <div className="relative h-32 -mx-4 -mt-4 mb-3 rounded-t-lg overflow-hidden">
+            <img
+              src={photoUrl}
+              alt={name}
+              className="w-full h-full object-cover"
+            />
+            <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent" />
+            <div className="absolute bottom-2 left-3 right-3 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <div className={`p-1.5 rounded-full bg-white/90 backdrop-blur-sm ${colorMap[displayType] || colorMap.gas}`}>
+                  <Icon className="w-4 h-4" />
+                </div>
+                {openNow !== undefined && (
+                  <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${openNow ? 'bg-green-500 text-white' : 'bg-red-500 text-white'}`}>
+                    {openNow ? 'Open now' : 'Closed'}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-1 text-xs text-white backdrop-blur-sm bg-black/30 px-2 py-1 rounded-full">
+                <MapPin className="w-3 h-3" />
+                <span>{distanceOffRoute}</span>
+              </div>
+            </div>
           </div>
+        )}
+
+        <div className="flex items-start gap-3">
+          {!photoUrl && (
+            <div className={`mt-0.5 ${colorMap[displayType] || colorMap.gas}`}>
+              <Icon className="w-5 h-5" />
+            </div>
+          )}
           <div className="flex-1 min-w-0 space-y-1">
             <h3 className="text-sm font-semibold truncate" data-testid={`text-stop-name-${displayType}`}>{name}</h3>
             <p className="text-sm text-muted-foreground">{category}</p>
@@ -85,6 +136,15 @@ export default function StopCard({
                 <div className="flex items-center gap-1">
                   <Star className="w-3 h-3 fill-amber-400 text-amber-400" />
                   <span className="font-medium">{rating}</span>
+                  {userRatingsTotal && (
+                    <span className="text-muted-foreground">({userRatingsTotal.toLocaleString()})</span>
+                  )}
+                </div>
+              )}
+              {priceLevel && (
+                <div className="flex items-center gap-1">
+                  <DollarSign className="w-3 h-3 text-green-600 dark:text-green-400" />
+                  <span className="font-medium text-green-600 dark:text-green-400">{getPriceDisplay(priceLevel)}</span>
                 </div>
               )}
               {hours && (
@@ -119,11 +179,46 @@ export default function StopCard({
               </div>
             )}
           </div>
-          <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
-            <MapPin className="w-3 h-3" />
-            <span>{distanceOffRoute}</span>
-          </div>
+          {!photoUrl && (
+            <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
+              <MapPin className="w-3 h-3" />
+              <span>{distanceOffRoute}</span>
+            </div>
+          )}
         </div>
+
+        {/* Additional Details Section */}
+        {(address || phone || website) && (
+          <div className="border-t pt-3 space-y-2">
+            {address && (
+              <div className="flex items-start gap-2 text-xs">
+                <MapPin className="w-3.5 h-3.5 text-muted-foreground mt-0.5 shrink-0" />
+                <span className="text-muted-foreground">{address}</span>
+              </div>
+            )}
+            {phone && (
+              <a
+                href={`tel:${phone}`}
+                className="flex items-center gap-2 text-xs text-blue-600 dark:text-blue-400 hover:underline"
+              >
+                <Phone className="w-3.5 h-3.5 shrink-0" />
+                <span>{phone}</span>
+              </a>
+            )}
+            {website && (
+              <a
+                href={website}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2 text-xs text-blue-600 dark:text-blue-400 hover:underline"
+              >
+                <Globe className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">Website</span>
+                <ExternalLink className="w-3 h-3 shrink-0" />
+              </a>
+            )}
+          </div>
+        )}
 
         {/* Grounded Justification - Prominently displayed by default */}
         <Collapsible open={isOpen} onOpenChange={setIsOpen}>
