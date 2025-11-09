@@ -93,47 +93,60 @@ export function useMicrophone(options: UseMicrophoneOptions = {}) {
    * Start listening (wake word detection or direct recording)
    */
   const startListening = useCallback(async (isAutoStart = false) => {
+    console.log('[useMicrophone] startListening called - enableWakeWord:', enableWakeWord, 'isAutoStart:', isAutoStart);
+
     if (!checkBrowserCompatibility()) {
       const errorMsg = 'Your browser does not support speech recognition. Please use Chrome or Edge.';
+      console.error('[useMicrophone] Browser compatibility check failed');
       setError(errorMsg);
       if (!isAutoStart) {
         alert(errorMsg);
       }
       return false;
     }
+    console.log('[useMicrophone] Browser compatibility check passed');
 
     const hasPermission = await requestMicrophonePermission();
     if (!hasPermission) {
       const errorMsg = 'Could not access microphone. Please check permissions.';
+      console.error('[useMicrophone] Microphone permission denied');
       setError(errorMsg);
       if (!isAutoStart) {
         alert(errorMsg);
       }
       return false;
     }
+    console.log('[useMicrophone] Microphone permission granted');
 
     setError(null);
 
     if (enableWakeWord) {
       // Start wake word detection
+      console.log('[useMicrophone] Starting wake word detection mode...');
+
+      // CRITICAL FIX: Update ref BEFORE starting wake word detection
+      isListeningRef.current = true;
       setIsListening(true);
+
       wakeWordRecognitionRef.current = startWakeWordDetection(
         handleWakeWordDetected,
         () => isListeningRef.current
       );
-      console.log('[useMicrophone] Wake word detection started');
+      console.log('[useMicrophone] Wake word detection started - listening for "Hey Journey"');
     } else {
       // Start recording directly
+      console.log('[useMicrophone] Starting direct recording mode...');
       setIsRecording(true);
       const state = await startRecordingWithSilenceDetection(
         handleTranscript,
         handleStopRecording
       );
-      
+
       if (state) {
         recordingStateRef.current = state;
         console.log('[useMicrophone] Direct recording started');
       } else {
+        console.error('[useMicrophone] Failed to start recording');
         setError('Failed to start recording');
         setIsRecording(false);
         return false;
@@ -148,7 +161,10 @@ export function useMicrophone(options: UseMicrophoneOptions = {}) {
    */
   const stopListening = useCallback(() => {
     console.log('[useMicrophone] Stopping listening...');
-    
+
+    // CRITICAL FIX: Update ref BEFORE stopping to prevent race conditions
+    isListeningRef.current = false;
+
     // Stop wake word detection
     if (wakeWordRecognitionRef.current) {
       try {
@@ -171,9 +187,12 @@ export function useMicrophone(options: UseMicrophoneOptions = {}) {
    * Toggle listening on/off
    */
   const toggleListening = useCallback(async () => {
+    console.log('[useMicrophone] toggleListening called - isListening:', isListening, 'isRecording:', isRecording);
     if (isListening || isRecording) {
+      console.log('[useMicrophone] Stopping listening...');
       stopListening();
     } else {
+      console.log('[useMicrophone] Starting listening...');
       await startListening(false);
     }
   }, [isListening, isRecording, stopListening, startListening]);

@@ -37,7 +37,7 @@ export function startWakeWordDetection(
   const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
   if (!SpeechRecognition) {
-    console.error('Speech recognition not supported in this browser');
+    console.error('[Wake Word Detection] Speech recognition not supported in this browser');
     return null;
   }
 
@@ -46,6 +46,32 @@ export function startWakeWordDetection(
   recognition.interimResults = true; // Get interim results for faster detection
   recognition.lang = 'en-US';
 
+  // Track recognition state to prevent race conditions
+  let isStarting = false;
+  let isStopping = false;
+
+  const safeStart = () => {
+    if (isStarting || isStopping || !isListeningRef()) {
+      console.log('[Wake Word Detection] Skipping start - isStarting:', isStarting, 'isStopping:', isStopping, 'isListening:', isListeningRef());
+      return;
+    }
+
+    isStarting = true;
+    try {
+      recognition.start();
+      console.log('🎤 [Wake Word Detection] ✅ Started listening for "Hey Journey"');
+      console.log('💡 [Wake Word Detection] Speak clearly: "Hey Journey"');
+      isStarting = false;
+    } catch (e: any) {
+      console.error('[Wake Word Detection] Failed to start:', e.message);
+      isStarting = false;
+      // If already started, that's okay - we're already listening
+      if (e.message.includes('already started')) {
+        console.log('[Wake Word Detection] Already running, continuing...');
+      }
+    }
+  };
+
   recognition.onresult = (event: any) => {
     const transcript = Array.from(event.results)
       .map((result: any) => result[0].transcript)
@@ -53,49 +79,83 @@ export function startWakeWordDetection(
       .toLowerCase()
       .trim();
 
-    console.log('[Wake Word Detection] Heard:', transcript);
+    // Enhanced logging to see exactly what's being heard
+    console.log('🎤 [Wake Word Detection] Raw transcript:', transcript);
+    console.log('🔍 [Wake Word Detection] Looking for:', WAKE_WORD);
+    console.log('✅ [Wake Word Detection] Contains wake word?', transcript.includes(WAKE_WORD));
+    console.log('📊 [Wake Word Detection] isListening?', isListeningRef());
 
-    if (isListeningRef() && transcript.includes(WAKE_WORD)) {
-      console.log('[Wake Word Detection] Wake word detected!');
-      recognition.stop();
-      setTimeout(() => onWakeWordDetected(), 500);
+    // Try multiple variations of the wake word
+    const variations = [
+      'hey journey',
+      'heyjourney',
+      'hey jorney',
+      'a journey',
+      'hey turning',
+    ];
+
+    const matchedVariation = variations.find(v => transcript.includes(v));
+
+    if (matchedVariation) {
+      console.log('✨ [Wake Word Detection] MATCHED VARIATION:', matchedVariation);
+    }
+
+    if (isListeningRef() && (transcript.includes(WAKE_WORD) || matchedVariation)) {
+      console.log('🎉 [Wake Word Detection] WAKE WORD DETECTED!');
+      isStopping = true;
+      try {
+        recognition.stop();
+      } catch (e) {
+        console.error('[Wake Word Detection] Error stopping:', e);
+      }
+      setTimeout(() => {
+        isStopping = false;
+        onWakeWordDetected();
+      }, 500);
     }
   };
 
   recognition.onerror = (event: any) => {
     console.error('[Wake Word Detection] Error:', event.error);
+
+    // Handle different error types
     if (event.error === 'no-speech') {
-      // Restart after no speech detected
+      // Expected when no speech detected - just restart
+      console.log('[Wake Word Detection] No speech detected, will restart on end event');
+    } else if (event.error === 'audio-capture') {
+      // Microphone access issue - wait longer before retry
+      console.error('[Wake Word Detection] Audio capture failed - microphone may be in use');
       setTimeout(() => {
-        if (isListeningRef()) {
-          try {
-            recognition.start();
-          } catch (e) {
-            console.error('[Wake Word Detection] Failed to restart:', e);
-          }
+        if (isListeningRef() && !isStarting && !isStopping) {
+          safeStart();
         }
-      }, 100);
+      }, 1000);
+    } else if (event.error === 'not-allowed') {
+      console.error('[Wake Word Detection] Permission denied - stopping');
+      isStopping = true;
+    } else {
+      // Other errors - retry after delay
+      setTimeout(() => {
+        if (isListeningRef() && !isStarting && !isStopping) {
+          safeStart();
+        }
+      }, 500);
     }
   };
 
   recognition.onend = () => {
-    console.log('[Wake Word Detection] Ended, restarting...');
-    if (isListeningRef()) {
-      try {
-        recognition.start();
-      } catch (e) {
-        console.error('[Wake Word Detection] Failed to restart on end:', e);
-      }
+    console.log('[Wake Word Detection] Ended');
+    if (isListeningRef() && !isStopping) {
+      // Wait a bit before restarting to avoid race conditions
+      setTimeout(() => {
+        safeStart();
+      }, 100);
+    } else {
+      console.log('[Wake Word Detection] Not restarting - isListening:', isListeningRef(), 'isStopping:', isStopping);
     }
   };
 
-  try {
-    recognition.start();
-    console.log('[Wake Word Detection] Started listening for wake word');
-  } catch (e) {
-    console.error('[Wake Word Detection] Failed to start:', e);
-  }
-
+  safeStart();
   return recognition;
 }
 
@@ -250,7 +310,7 @@ export async function requestMicrophonePermission(): Promise<boolean> {
       return false;
     }
 
-    // Request permission with timeout
+    // Request permission with longer timeout (15 seconds - enough time for user to allow)
     const getUserMediaPromise = navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: true,
@@ -260,7 +320,7 @@ export async function requestMicrophonePermission(): Promise<boolean> {
     });
 
     const timeoutPromise = new Promise<MediaStream>((_, reject) => {
-      setTimeout(() => reject(new Error('getUserMedia timeout after 5 seconds')), 5000);
+      setTimeout(() => reject(new Error('getUserMedia timeout after 15 seconds - user may have dismissed permission dialog')), 15000);
     });
 
     const permissionStream = await Promise.race([getUserMediaPromise, timeoutPromise]);
@@ -272,6 +332,8 @@ export async function requestMicrophonePermission(): Promise<boolean> {
   } catch (error: any) {
     if (error.name === 'NotAllowedError') {
       console.error('[Microphone] Permission denied by user');
+    } else if (error.message && error.message.includes('timeout')) {
+      console.error('[Microphone] Timeout waiting for permission - user may need to check browser settings');
     } else {
       console.error('[Microphone] Error accessing microphone:', error);
     }
