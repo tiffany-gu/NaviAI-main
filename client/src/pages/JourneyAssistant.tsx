@@ -47,6 +47,7 @@ export default function JourneyAssistant() {
   const [stops, setStops] = useState<Stop[]>([]);
   const [addedStops, setAddedStops] = useState<Array<{ type: string; name: string; location: { lat: number; lng: number }; category?: string }>>([]);
   const [userRequestedStops, setUserRequestedStops] = useState(false);
+  const [presentedStopTypes, setPresentedStopTypes] = useState<Set<string>>(new Set()); // Track which stop types we've already shown
   const scrollRef = useRef<HTMLDivElement>(null);
   const { toast } = useToast();
 
@@ -190,6 +191,7 @@ export default function JourneyAssistant() {
           setRouteData(null);  // Clear old route
           setStops([]);        // Clear old stops
           setAddedStops([]);   // Clear manually added stops
+          setPresentedStopTypes(new Set()); // Reset presented stop types
         }
         setTripRequestId(data.tripRequestId);
       }
@@ -200,6 +202,7 @@ export default function JourneyAssistant() {
         // If route already exists and user is now asking for stops, find them
         if (routeData && data.tripRequestId) {
           findStopsMutation.mutate(data.tripRequestId);
+          return; // Don't call planRouteMutation again since we already have the route
         }
       }
 
@@ -227,18 +230,12 @@ export default function JourneyAssistant() {
 
       // Only find stops if user explicitly requested them
       if (userRequestedStops) {
-        const routeMessage: Message = {
-          id: crypto.randomUUID(),
-          text: "I've found your route! Let me find some great stops along the way...",
-          isUser: false,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        };
-        setMessages((prev) => [...prev, routeMessage]);
+        // Silently find stops - no extra message needed since we already said we're doing it
         findStopsMutation.mutate(variables);
       } else {
         const routeMessage: Message = {
           id: crypto.randomUUID(),
-          text: "I've found your route! If you'd like me to find stops along the way, just ask (e.g., 'find a restaurant' or 'find a gas station').",
+          text: "Route planned! If you'd like stops along the way, just ask (e.g., 'find a restaurant').",
           isUser: false,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
@@ -260,11 +257,38 @@ export default function JourneyAssistant() {
       return await res.json();
     },
     onSuccess: (data: any) => {
-      setStops(data.stops || []);
-      
+      console.log('[findStopsMutation] 🔍 STOP FILTERING DEBUG:');
+      console.log('[findStopsMutation]   Received stops from backend:', data.stops?.length || 0);
+      console.log('[findStopsMutation]   Stop types received:', data.stops?.map((s: Stop) => s.type).join(', ') || 'none');
+      console.log('[findStopsMutation]   Already presented types:', Array.from(presentedStopTypes).join(', ') || 'none');
+
+      // Filter out stops of types we've already presented
+      const newStops = (data.stops || []).filter((stop: Stop) => {
+        const shouldShow = !presentedStopTypes.has(stop.type);
+        console.log(`[findStopsMutation]   Stop "${stop.name}" (${stop.type}): ${shouldShow ? '✅ SHOW' : '❌ SKIP (already presented)'}`);
+        return shouldShow;
+      });
+
+      console.log('[findStopsMutation] 🔀 After filtering:', newStops.length, 'new stops to display');
+
+      // Update presented stop types
+      const newTypes = [...new Set(newStops.map((s: Stop) => s.type))];
+      console.log('[findStopsMutation] ✅ Marking as presented:', newTypes.join(', ') || 'none');
+      newStops.forEach((stop: Stop) => {
+        setPresentedStopTypes(prev => {
+          const updated = new Set(prev).add(stop.type);
+          console.log('[findStopsMutation]   Updated presentedStopTypes:', Array.from(updated).join(', '));
+          return updated;
+        });
+      });
+
+      // Append new stops to existing stops (don't replace)
+      setStops(prev => {
+        console.log('[findStopsMutation] 📍 Total stops now:', prev.length + newStops.length, '(previous:', prev.length, '+ new:', newStops.length, ')');
+        return [...prev, ...newStops];
+      });
+
       // Update route if a new route with waypoints was returned
-      // When stops are found, they're automatically added to the route by the backend
-      // So we should track which stops were automatically added
       if (data.route) {
         console.log('[JourneyAssistant] Updating route with waypoints from find-stops');
         console.log('[JourneyAssistant] Route legs:', data.route.legs?.length || 0);
@@ -272,29 +296,21 @@ export default function JourneyAssistant() {
           console.log(`[JourneyAssistant] Leg ${i + 1}: ${leg.start_address} → ${leg.end_address}`);
         });
         setRouteData(data.route);
-        
-        // If the backend automatically recalculated the route with stops,
-        // we should mark those stops as "added" so they show as waypoints
-        // However, for now, we'll let users manually add stops via the UI
-        // The route already includes them as waypoints in the backend response
-
-        const routeMessage: Message = {
-          id: crypto.randomUUID(),
-          text: `Route recalculated to include ${data.stops?.length || 0} stop${data.stops?.length !== 1 ? 's' : ''}. The directions now go through each stop in order.`,
-          isUser: false,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        };
-        setMessages((prev) => [...prev, routeMessage]);
       }
 
-      if (data.stops && data.stops.length > 0) {
+      // Single consolidated message about stops found
+      if (newStops.length > 0) {
+        const stopTypes = [...new Set(newStops.map((s: Stop) => s.type))].join(', ');
         const stopsMessage: Message = {
           id: crypto.randomUUID(),
-          text: `Found ${data.stops.length} recommended stop${data.stops.length > 1 ? 's' : ''} along your route! Click "Add to Route" to include them in your directions.`,
+          text: `Found ${newStops.length} recommended ${stopTypes} stop${newStops.length > 1 ? 's' : ''} along your route! Click "Add to Route" to include ${newStops.length > 1 ? 'them' : 'it'} in your directions.`,
           isUser: false,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         };
         setMessages((prev) => [...prev, stopsMessage]);
+      } else if (data.stops && data.stops.length > 0) {
+        // All stops were filtered out (already presented)
+        console.log('[findStopsMutation] All stops already presented, skipping message');
       } else {
         const noStopsMessage: Message = {
           id: crypto.randomUUID(),

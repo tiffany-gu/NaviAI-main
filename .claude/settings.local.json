@@ -22,7 +22,8 @@
       "Bash(NODE_ENV=development tsx:*)",
       "Bash(chmod:*)",
       "Bash(bash:*)",
-      "Bash(NODE_ENV=development npx tsx:*)"
+      "Bash(NODE_ENV=development npx tsx:*)",
+      "Bash(git commit:*)"
     ],
     "deny": [],
     "ask": []

@@ -124,11 +124,49 @@ export async function registerRoutes(app: Express): Promise<Server> {
         });
         currentTripId = tripRequest.id;
       } else if (!hasMissingInfo && tripRequestId) {
+        // Merge new preferences with existing ones instead of replacing
+        const existingTrip = await storage.getTripRequest(tripRequestId);
+        let mergedPreferences = existingTrip?.preferences || {};
+
+        console.log('[chat] 🔍 PREFERENCE MERGE DEBUG:');
+        console.log('[chat] Existing preferences:', JSON.stringify(existingTrip?.preferences, null, 2));
+        console.log('[chat] New preferences from user:', JSON.stringify(tripParameters.preferences, null, 2));
+
+        if (tripParameters.preferences) {
+          // Deep merge requestedStops
+          if (tripParameters.preferences.requestedStops) {
+            const oldStops = mergedPreferences.requestedStops || {};
+            const newStops = tripParameters.preferences.requestedStops;
+
+            mergedPreferences = {
+              ...mergedPreferences,
+              requestedStops: {
+                ...oldStops,
+                ...newStops,
+              },
+            };
+
+            console.log('[chat] 🔀 Merging requestedStops:');
+            console.log('[chat]   Old stops:', JSON.stringify(oldStops, null, 2));
+            console.log('[chat]   New stops:', JSON.stringify(newStops, null, 2));
+            console.log('[chat]   Merged stops:', JSON.stringify(mergedPreferences.requestedStops, null, 2));
+          }
+
+          // Merge other preference fields
+          Object.keys(tripParameters.preferences).forEach(key => {
+            if (key !== 'requestedStops' && tripParameters.preferences![key as keyof typeof tripParameters.preferences] !== undefined) {
+              (mergedPreferences as any)[key] = tripParameters.preferences![key as keyof typeof tripParameters.preferences];
+            }
+          });
+        }
+
         await storage.updateTripRequest(tripRequestId, {
           fuelLevel: tripParameters.fuelLevel ?? undefined,
           vehicleRange: tripParameters.vehicleRange ?? undefined,
-          preferences: tripParameters.preferences ?? undefined,
+          preferences: mergedPreferences,
         });
+
+        console.log('[chat] ✅ Final merged preferences saved to DB:', JSON.stringify(mergedPreferences, null, 2));
       }
 
       if (currentTripId) {
@@ -275,10 +313,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.log(`[find-stops] Finding grounded stops for ${routeDistanceMiles.toFixed(0)}-mile route`);
 
       // Step 1: Determine which stops to find based on user request AND intelligent defaults
-      const requestedStops = tripRequest.preferences?.requestedStops;
+      // IMPORTANT: Reload trip request to get freshly merged preferences from database
+      const refreshedTripRequest = await storage.getTripRequest(tripRequestId);
+      const requestedStops = refreshedTripRequest?.preferences?.requestedStops || tripRequest.preferences?.requestedStops;
       const userWantsGas = requestedStops?.gas === true;
       const userWantsRestaurant = requestedStops?.restaurant === true;
       const userWantsScenic = requestedStops?.scenic === true;
+
+      console.log('[find-stops] Requested stops from DB:', JSON.stringify(requestedStops));
 
       // Calculate route duration for intelligent defaults
       const routeDuration = tripRequest.route.legs?.[0]?.duration?.value || 0;

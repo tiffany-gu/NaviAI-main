@@ -468,6 +468,11 @@ export async function parseUserRequest(userMessage: string, conversationHistory:
 
 You are a location extraction AI with access to Google Maps data. Extract the origin and destination from this travel request and resolve them to actual locations.
 
+CONTEXT AWARENESS:
+- If the conversation history shows a route is already planned (e.g., "from X to Y"), and the new message is JUST asking for stops (e.g., "the restaurant", "find a gas station", "I want food"), DO NOT change the origin or destination
+- In these cases, ONLY extract the stop preference request (e.g., preferences: {"requestedStops": {"restaurant": true}})
+- If the message is clearly a NEW destination (e.g., "now take me to Boston", "go to Miami instead"), then extract the new destination
+
 TASK:
 1. Extract the origin and destination location names from the user's message
 2. For each location, provide:
@@ -516,6 +521,26 @@ Input: "plan a trip to boston"
 Output: {
   "destination": "Boston, MA",
   "action": "useCurrentLocation"
+}
+
+CONTEXT-AWARE EXAMPLES (when route already exists):
+
+Previous conversation shows: "from Atlanta to Emory University"
+Input: "the restaurant"
+Output: {
+  "preferences": {"requestedStops": {"restaurant": true}}
+}
+
+Previous conversation shows: "take me to Emory University"
+Input: "find a gas station"
+Output: {
+  "preferences": {"requestedStops": {"gas": true}}
+}
+
+Previous conversation shows: "go to Boston"
+Input: "I want food"
+Output: {
+  "preferences": {"requestedStops": {"restaurant": true}}
 }
 
 IMPORTANT RULE: When no "from" location is specified, automatically set "action": "useCurrentLocation" so the system uses the user's current location as the starting point.
@@ -820,8 +845,19 @@ IMPORTANT:
       const jsonMatch = text.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]) as TripParameters;
-        if (parsed.origin) parsed.origin = parsed.origin.trim();
-        if (parsed.destination) parsed.destination = parsed.destination.trim();
+        // Add type guards to prevent .trim() errors
+        if (parsed.origin && typeof parsed.origin === 'string') {
+          parsed.origin = parsed.origin.trim();
+        } else if (parsed.origin) {
+          console.warn('[parseUserRequest] Invalid origin type:', typeof parsed.origin);
+          parsed.origin = undefined;
+        }
+        if (parsed.destination && typeof parsed.destination === 'string') {
+          parsed.destination = parsed.destination.trim();
+        } else if (parsed.destination) {
+          console.warn('[parseUserRequest] Invalid destination type:', typeof parsed.destination);
+          parsed.destination = undefined;
+        }
         const invalidWords = /^(plan|route|trip|go|travel|want|need|from|to)$/i;
         if (parsed.origin && (parsed.origin.length < 3 || invalidWords.test(parsed.origin))) {
           parsed.origin = undefined;
@@ -1231,10 +1267,17 @@ Extracted parameters: ${JSON.stringify(tripParameters)}
   if (hasMissingInfo) {
     prompt += `Some information is missing. Ask the user conversationally for the missing details (origin, destination, or fuel/vehicle info if they mentioned needing gas stops).`;
   } else {
-    if (usingCurrentLocation) {
-      prompt += `All necessary information is available. The user did not specify a starting location, so we're using their current location as the starting point. Acknowledge the request conversationally and mention that you're using their current location as the starting point, then let them know you're planning their route.`;
+    // Check if user is just requesting stops (no origin/destination change)
+    const justRequestingStops = !tripParameters.origin && !tripParameters.destination &&
+                                 tripParameters.preferences?.requestedStops;
+
+    if (justRequestingStops) {
+      const stopType = Object.keys(tripParameters.preferences?.requestedStops || {})[0] || 'stop';
+      prompt += `The user is requesting a ${stopType} for an existing route. Give a VERY brief acknowledgment in 3-5 words ONLY (e.g., "Looking for ${stopType}s!" or "Finding ${stopType} options."). DO NOT mention the origin or destination. DO NOT say "I'll plan your route". Keep it ultra-concise.`;
+    } else if (usingCurrentLocation) {
+      prompt += `All necessary information is available. The user did not specify a starting location, so we're using their current location as the starting point. Give a brief acknowledgment in ONE short sentence (e.g., "Planning route to [destination]").`;
     } else {
-      prompt += `All necessary information is available. Acknowledge the request and let them know you're planning their route.`;
+      prompt += `All necessary information is available. Give a brief acknowledgment in ONE short sentence (e.g., "Planning route to [destination]"). Be concise - max 10 words.`;
     }
   }
 
