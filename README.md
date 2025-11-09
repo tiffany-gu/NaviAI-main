@@ -170,18 +170,18 @@ JourneyCompass/
 ---
 
 ## Key Design Details
-	•	**Grounded Results:** AI output verified with Google Places data (ratings, attributes, hours).
-	•	**Road-Matched Routes:** Always generated using Google Directions API.
-	•	**Time Awareness:** Adjusts stop durations to meet “arrive by” or “leave at” constraints.
-	•	**Clear Visualization:** Type-specific icons and numbered waypoints.
+- **Grounded Results:** AI output verified with Google Places data (ratings, attributes, hours).
+- **Road-Matched Routes:** Always generated using Google Directions API.
+- **Time Awareness:** Adjusts stop durations to meet “arrive by” or “leave at” constraints.
+- **Clear Visualization:** Type-specific icons and numbered waypoints.
 
 ---
 
 ## API Endpoints
-	•	`POST /api/chat` → Parse natural-language requests
-	•	`POST /api/route` → Compute Google route
-	•	`POST /api/find-stops` → Recommend verified stops
-	•	`POST /api/update-route` → Re-route with added waypoints
+- `POST /api/chat` → Parse natural-language requests
+- `POST /api/route` → Compute Google route
+- `POST /api/find-stops` → Recommend verified stops
+- `POST /api/update-route` → Re-route with added waypoints
 
 ---
 
